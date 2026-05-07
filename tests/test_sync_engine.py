@@ -130,10 +130,13 @@ class TestDiffManifests:
         assert len(needs) == 1
         assert needs[0]["block_indices"] == [0]
 
-    def test_dir_entries_skipped(self):
+    def test_dir_entries_synced(self):
         local = {}
-        remote = {"adir": {"path": "adir", "is_dir": True, "blocks": []}}
-        assert diff_manifests(local, remote) == []
+        remote = {"adir": {"path": "adir", "is_dir": True, "mtime": 100.0}}
+        needs = diff_manifests(local, remote)
+        assert len(needs) == 1
+        assert needs[0]["path"] == "adir"
+        assert needs[0].get("is_dir") is True
 
     def test_partial_block_change(self):
         blocks_local = [
@@ -240,6 +243,16 @@ class TestDeletePath:
 
     def test_delete_nonexistent(self, tmp_path):
         delete_path(str(tmp_path), "ghost.txt")
+
+
+class TestPathNormalization:
+    def test_scan_directory_uses_forward_slash(self, tmp_path):
+        sub = tmp_path / "a" / "b"
+        sub.mkdir(parents=True)
+        (sub / "file.txt").write_bytes(b"x")
+        manifest = scan_directory(str(tmp_path))
+        assert "a/b/file.txt" in manifest
+        assert "a\\b\\file.txt" not in manifest
 
 
 class TestEnsureParentDir:

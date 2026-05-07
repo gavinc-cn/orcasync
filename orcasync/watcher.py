@@ -48,7 +48,11 @@ class _Handler(FileSystemEventHandler):
         self.cb = callback
 
     def _rel(self, path):
-        return os.path.relpath(path, self.root_path)
+        # Strip Windows long path prefix
+        if path.startswith("\\\\?\\"):
+            path = path[4:]
+        rel = os.path.relpath(path, self.root_path)
+        return rel.replace(os.sep, "/")
 
     def on_created(self, event):
         self.cb("create", self._rel(event.src_path), event.is_directory)

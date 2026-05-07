@@ -11,6 +11,7 @@ from .sync_engine import (
     read_block,
     write_blocks,
     delete_path,
+    ensure_dir,
     BLOCK_SIZE,
 )
 from .watcher import FileWatcher
@@ -88,15 +89,21 @@ class SyncSession:
 
     async def _request_needed(self):
         needs = diff_manifests(self.local_manifest, self._remote_manifest)
-        self._pending_transfers = {n["path"] for n in needs}
-        logger.info("Need to pull %d files from remote", len(needs))
-        for need in needs:
+        file_needs = [n for n in needs if not n.get("is_dir")]
+        dir_needs = [n for n in needs if n.get("is_dir")]
+        self._pending_transfers = {n["path"] for n in file_needs}
+        logger.info("Need to pull %d files and %d dirs from remote", len(file_needs), len(dir_needs))
+        # Create directories immediately (no need to request blocks)
+        for need in dir_needs:
+            ensure_dir(self.root_path, need["path"])
+            logger.info("Created dir: %s", need["path"])
+        for need in file_needs:
             indices = need["block_indices"]
             await self.send(
                 "request_blocks",
                 {"path": need["path"], "indices": indices if indices else "all"},
             )
-        if not needs:
+        if not file_needs and not dir_needs:
             await self.send("sync_done", {})
             self._check_sync_complete()
 
@@ -121,11 +128,7 @@ class SyncSession:
         self._running = False
 
     async def _handle_manifest(self, data, _payload):
-        self._remote_manifest = {
-            k: v
-            for k, v in data.get("files", {}).items()
-            if not v.get("is_dir")
-        }
+        self._remote_manifest = data.get("files", {})
         self._manifest_event.set()
 
     async def _handle_request_blocks(self, data, _payload):
@@ -170,6 +173,10 @@ class SyncSession:
                 self._pending_blocks.pop(path),
                 expected_size=size,
             )
+            logger.info("Synced: %s", path)
+        elif size == 0:
+            self._synced_files[path] = time.time()
+            write_blocks(self.root_path, path, [], expected_size=0)
             logger.info("Synced: %s", path)
         self._pending_transfers.discard(path)
         if not self._pending_transfers and not self._initial_sync_done:
@@ -230,9 +237,12 @@ class SyncSession:
             else:
                 self._synced_files[path] = time.time()
                 expected_size = data.get("size")
-                if expected_size is not None and os.path.exists(fpath):
-                    with open(fpath, "r+b") as f:
-                        f.truncate(expected_size)
+                if expected_size is not None:
+                    if not os.path.exists(fpath):
+                        open(fpath, "wb").close()
+                    if os.path.isfile(fpath):
+                        with open(fpath, "r+b") as f:
+                            f.truncate(expected_size)
                     logger.info("File already in sync: %s", path)
 
     def _start_watcher(self):

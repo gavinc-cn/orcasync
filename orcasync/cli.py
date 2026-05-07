@@ -5,6 +5,7 @@ import sys
 
 from .server import run_server
 from .client import run_client
+from .local_sync import LocalSyncSession
 
 
 def main():
@@ -36,6 +37,10 @@ def main():
         "--port", "-p", type=int, default=8384, help="Server port (default: 8384)"
     )
 
+    local_parser = subparsers.add_parser("local-sync", help="Sync two local folders directly (no TCP)")
+    local_parser.add_argument("--src", "-s", required=True, help="Source folder path")
+    local_parser.add_argument("--dst", "-d", required=True, help="Destination folder path")
+
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -54,6 +59,13 @@ def main():
             asyncio.run(run_client(args.local, args.remote, args.host, args.port))
         except KeyboardInterrupt:
             print("\nClient stopped.")
+    elif args.command == "local-sync":
+        session = LocalSyncSession(args.src, args.dst)
+        try:
+            asyncio.run(session.run())
+        except KeyboardInterrupt:
+            session.stop()
+            print("\nLocal sync stopped.")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,11 @@ import hashlib
 BLOCK_SIZE = 128 * 1024  # 128KB
 
 
+def normalize_path(path):
+    """Normalize path to use forward slashes for cross-platform consistency."""
+    return path.replace(os.sep, "/")
+
+
 def compute_file_blocks(filepath):
     blocks = []
     try:
@@ -31,14 +36,27 @@ def scan_directory(root_path):
     os.makedirs(root, exist_ok=True)
     manifest = {}
 
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == ".":
             rel_dir = ""
 
+        for dname in dirnames:
+            dpath = os.path.join(dirpath, dname)
+            rel_path = normalize_path(os.path.join(rel_dir, dname)) if rel_dir else dname
+            try:
+                stat = os.stat(dpath)
+                manifest[rel_path] = {
+                    "path": rel_path,
+                    "is_dir": True,
+                    "mtime": stat.st_mtime,
+                }
+            except (OSError, IOError):
+                continue
+
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
-            rel_path = os.path.join(rel_dir, fname) if rel_dir else fname
+            rel_path = normalize_path(os.path.join(rel_dir, fname)) if rel_dir else fname
             try:
                 stat = os.stat(fpath)
                 blocks = compute_file_blocks(fpath)
@@ -59,6 +77,9 @@ def diff_manifests(local_manifest, remote_manifest):
     needs = []
     for path, remote_info in remote_manifest.items():
         if remote_info.get("is_dir"):
+            local_info = local_manifest.get(path)
+            if local_info is None or not local_info.get("is_dir"):
+                needs.append({"path": path, "is_dir": True})
             continue
         local_info = local_manifest.get(path)
         if local_info is None or local_info.get("is_dir"):
@@ -86,13 +107,18 @@ def _same_blocks(a, b):
 
 
 def ensure_parent_dir(root_path, rel_path):
-    parent = os.path.dirname(os.path.join(root_path, rel_path))
+    parent = os.path.dirname(os.path.join(root_path, rel_path.replace("/", os.sep)))
     if parent:
         os.makedirs(parent, exist_ok=True)
 
 
+def ensure_dir(root_path, rel_path):
+    full = os.path.join(root_path, rel_path.replace("/", os.sep))
+    os.makedirs(full, exist_ok=True)
+
+
 def read_block(root_path, rel_path, block_index):
-    filepath = os.path.join(root_path, rel_path)
+    filepath = os.path.join(root_path, rel_path.replace("/", os.sep))
     try:
         with open(filepath, "rb") as f:
             f.seek(block_index * BLOCK_SIZE)
@@ -102,7 +128,7 @@ def read_block(root_path, rel_path, block_index):
 
 
 def write_blocks(root_path, rel_path, blocks_data, expected_size=None):
-    filepath = os.path.join(root_path, rel_path)
+    filepath = os.path.join(root_path, rel_path.replace("/", os.sep))
     ensure_parent_dir(root_path, rel_path)
     if not os.path.exists(filepath):
         open(filepath, "wb").close()
@@ -115,7 +141,7 @@ def write_blocks(root_path, rel_path, blocks_data, expected_size=None):
 
 
 def delete_path(root_path, rel_path):
-    full = os.path.join(root_path, rel_path)
+    full = os.path.join(root_path, rel_path.replace("/", os.sep))
     try:
         if os.path.isdir(full) and not os.path.islink(full):
             import shutil
