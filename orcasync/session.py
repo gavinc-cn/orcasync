@@ -15,12 +15,13 @@ from .sync_engine import (
     BLOCK_SIZE,
 )
 from .watcher import FileWatcher
+from .gitignore import GitIgnoreMatcher
 
 logger = logging.getLogger("orcasync")
 
 
 class SyncSession:
-    def __init__(self, root_path, reader, writer, loop):
+    def __init__(self, root_path, reader, writer, loop, use_gitignore=True):
         self.root_path = os.path.abspath(root_path)
         self.reader = reader
         self.writer = writer
@@ -29,6 +30,7 @@ class SyncSession:
         self._running = True
         self._recv_task = None
         self._watcher = None
+        self._gitignore_matcher = GitIgnoreMatcher(root_path) if use_gitignore else None
 
         self.local_manifest = {}
         self._remote_manifest = None
@@ -50,7 +52,7 @@ class SyncSession:
     async def run_as_client(self):
         try:
             self._recv_task = asyncio.create_task(self._recv_loop())
-            self.local_manifest = scan_directory(self.root_path)
+            self.local_manifest = scan_directory(self.root_path, gitignore_matcher=self._gitignore_matcher)
             logger.info("Local manifest: %d files", len(self.local_manifest))
             await self.send("manifest", {"files": self.local_manifest})
             logger.info("Waiting for remote manifest...")
@@ -73,7 +75,7 @@ class SyncSession:
             logger.info("Waiting for client manifest...")
             await self._manifest_event.wait()
             logger.info("Client manifest received: %d files", len(self._remote_manifest))
-            self.local_manifest = scan_directory(self.root_path)
+            self.local_manifest = scan_directory(self.root_path, gitignore_matcher=self._gitignore_matcher)
             logger.info("Local manifest: %d files", len(self.local_manifest))
             await self.send("manifest", {"files": self.local_manifest})
             await self._request_needed()
@@ -247,7 +249,8 @@ class SyncSession:
 
     def _start_watcher(self):
         self._watcher = FileWatcher(
-            self.root_path, self._on_file_change, self.loop
+            self.root_path, self._on_file_change, self.loop,
+            gitignore_matcher=self._gitignore_matcher,
         )
         self._watcher.start()
         logger.info("File watcher started for: %s", self.root_path)

@@ -14,12 +14,13 @@ from .sync_engine import (
     BLOCK_SIZE,
 )
 from .watcher import FileWatcher
+from .gitignore import GitIgnoreMatcher
 
 logger = logging.getLogger("orcasync")
 
 
 class LocalSyncSession:
-    def __init__(self, src_path, dst_path):
+    def __init__(self, src_path, dst_path, use_gitignore=True):
         self.src_path = os.path.abspath(src_path)
         self.dst_path = os.path.abspath(dst_path)
         self._running = True
@@ -27,6 +28,8 @@ class LocalSyncSession:
         self._dst_watcher = None
         self._synced_files = {}
         self._lock = asyncio.Lock()
+        self._src_gitignore = GitIgnoreMatcher(self.src_path) if use_gitignore else None
+        self._dst_gitignore = GitIgnoreMatcher(self.dst_path) if use_gitignore else None
 
     async def run(self):
         await self.run_initial_sync()
@@ -37,8 +40,8 @@ class LocalSyncSession:
             await asyncio.sleep(1)
 
     async def run_initial_sync(self):
-        src_manifest = scan_directory(self.src_path)
-        dst_manifest = scan_directory(self.dst_path)
+        src_manifest = scan_directory(self.src_path, gitignore_matcher=self._src_gitignore)
+        dst_manifest = scan_directory(self.dst_path, gitignore_matcher=self._dst_gitignore)
 
         # Sync dst -> src
         src_needs = diff_manifests(src_manifest, dst_manifest)
@@ -85,10 +88,12 @@ class LocalSyncSession:
     def _start_watchers(self):
         loop = asyncio.get_running_loop()
         self._src_watcher = FileWatcher(
-            self.src_path, self._on_src_change, loop
+            self.src_path, self._on_src_change, loop,
+            gitignore_matcher=self._src_gitignore,
         )
         self._dst_watcher = FileWatcher(
-            self.dst_path, self._on_dst_change, loop
+            self.dst_path, self._on_dst_change, loop,
+            gitignore_matcher=self._dst_gitignore,
         )
         self._src_watcher.start()
         self._dst_watcher.start()

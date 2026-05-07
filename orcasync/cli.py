@@ -22,6 +22,9 @@ def main():
     server_parser.add_argument(
         "--port", "-p", type=int, default=8384, help="Listen port (default: 8384)"
     )
+    server_parser.add_argument(
+        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
+    )
 
     client_parser = subparsers.add_parser("client", help="Start sync client")
     client_parser.add_argument(
@@ -36,10 +39,16 @@ def main():
     client_parser.add_argument(
         "--port", "-p", type=int, default=8384, help="Server port (default: 8384)"
     )
+    client_parser.add_argument(
+        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
+    )
 
     local_parser = subparsers.add_parser("local-sync", help="Sync two local folders directly (no TCP)")
     local_parser.add_argument("--src", "-s", required=True, help="Source folder path")
     local_parser.add_argument("--dst", "-d", required=True, help="Destination folder path")
+    local_parser.add_argument(
+        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
+    )
 
     args = parser.parse_args()
 
@@ -49,18 +58,20 @@ def main():
         datefmt="%H:%M:%S",
     )
 
+    use_gitignore = not getattr(args, "no_gitignore", False)
+
     if args.command == "server":
         try:
-            asyncio.run(run_server(args.host, args.port))
+            asyncio.run(run_server(args.host, args.port, use_gitignore=use_gitignore))
         except KeyboardInterrupt:
             print("\nServer stopped.")
     elif args.command == "client":
         try:
-            asyncio.run(run_client(args.local, args.remote, args.host, args.port))
+            asyncio.run(run_client(args.local, args.remote, args.host, args.port, use_gitignore=use_gitignore))
         except KeyboardInterrupt:
             print("\nClient stopped.")
     elif args.command == "local-sync":
-        session = LocalSyncSession(args.src, args.dst)
+        session = LocalSyncSession(args.src, args.dst, use_gitignore=use_gitignore)
         try:
             asyncio.run(session.run())
         except KeyboardInterrupt:

@@ -5,10 +5,11 @@ from watchdog.events import FileSystemEventHandler
 
 
 class FileWatcher:
-    def __init__(self, root_path, callback, loop):
+    def __init__(self, root_path, callback, loop, gitignore_matcher=None):
         self.root_path = os.path.abspath(root_path)
         self.callback = callback
         self.loop = loop
+        self.gitignore_matcher = gitignore_matcher
         self.observer = Observer()
         self._pending = {}
         self._debounce = 0.5
@@ -23,6 +24,9 @@ class FileWatcher:
         self.observer.join(timeout=5)
 
     def _on_event(self, event_type, rel_path, is_dir):
+        # Filter ignored paths
+        if self.gitignore_matcher is not None and self.gitignore_matcher.is_ignored(rel_path, is_dir):
+            return
         key = (event_type, rel_path)
 
         def _schedule():

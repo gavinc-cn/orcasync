@@ -31,7 +31,7 @@ def compute_file_blocks(filepath):
     return blocks
 
 
-def scan_directory(root_path):
+def scan_directory(root_path, gitignore_matcher=None):
     root = os.path.abspath(root_path)
     os.makedirs(root, exist_ok=True)
     manifest = {}
@@ -40,6 +40,16 @@ def scan_directory(root_path):
         rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == ".":
             rel_dir = ""
+
+        # Filter out ignored directories to prevent descending into them
+        if gitignore_matcher is not None:
+            dirnames[:] = [
+                dname for dname in dirnames
+                if not gitignore_matcher.is_ignored(
+                    normalize_path(os.path.join(rel_dir, dname)) if rel_dir else dname,
+                    is_dir=True,
+                )
+            ]
 
         for dname in dirnames:
             dpath = os.path.join(dirpath, dname)
@@ -57,6 +67,8 @@ def scan_directory(root_path):
         for fname in filenames:
             fpath = os.path.join(dirpath, fname)
             rel_path = normalize_path(os.path.join(rel_dir, fname)) if rel_dir else fname
+            if gitignore_matcher is not None and gitignore_matcher.is_ignored(rel_path, is_dir=False):
+                continue
             try:
                 stat = os.stat(fpath)
                 blocks = compute_file_blocks(fpath)

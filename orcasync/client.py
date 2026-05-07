@@ -8,7 +8,7 @@ from .session import SyncSession
 logger = logging.getLogger("orcasync")
 
 
-async def run_client(local_path, remote_path, host, port):
+async def run_client(local_path, remote_path, host, port, use_gitignore=True):
     local_path = os.path.abspath(local_path)
     os.makedirs(local_path, exist_ok=True)
 
@@ -30,7 +30,8 @@ async def run_client(local_path, remote_path, host, port):
         logger.info("Server accepted, syncing local=%s remote=%s", local_path, remote_path)
 
         session = SyncSession(
-            local_path, reader, writer, asyncio.get_running_loop()
+            local_path, reader, writer, asyncio.get_running_loop(),
+            use_gitignore=use_gitignore,
         )
         await session.run_as_client()
     except ConnectionRefusedError:
