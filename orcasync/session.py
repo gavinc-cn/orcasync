@@ -172,6 +172,8 @@ class SyncSession:
             )
             logger.info("Synced: %s", path)
         self._pending_transfers.discard(path)
+        if not self._pending_transfers and not self._initial_sync_done:
+            await self.send("sync_done", {})
         self._check_sync_complete()
 
     async def _handle_sync_done(self, _data, _payload):
