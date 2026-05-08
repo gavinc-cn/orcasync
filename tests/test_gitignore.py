@@ -50,6 +50,42 @@ class TestGitIgnoreMatcher:
             matcher = GitIgnoreMatcher(root)
             assert matcher.is_ignored(".gitignore", is_dir=False) is False
 
+    def test_custom_ignore_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, ".syncignore"), "w") as f:
+                f.write("*.tmp\n")
+            with open(os.path.join(root, ".gitignore"), "w") as f:
+                f.write("*.pyc\n")
+            matcher = GitIgnoreMatcher(root, ignore_file=".syncignore")
+            # Custom file takes precedence
+            assert matcher.is_ignored("foo.tmp", is_dir=False) is True
+            # .gitignore is ignored when custom file exists
+            assert matcher.is_ignored("foo.pyc", is_dir=False) is False
+
+    def test_custom_ignore_file_applies_recursively(self):
+        with tempfile.TemporaryDirectory() as root:
+            os.makedirs(os.path.join(root, "sub"))
+            with open(os.path.join(root, ".syncignore"), "w") as f:
+                f.write("*.log\n")
+            matcher = GitIgnoreMatcher(root, ignore_file=".syncignore")
+            assert matcher.is_ignored("sub/debug.log", is_dir=False) is True
+
+    def test_custom_ignore_file_fallback_to_gitignore(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, ".gitignore"), "w") as f:
+                f.write("*.pyc\n")
+            # Custom file does not exist, fall back to .gitignore
+            matcher = GitIgnoreMatcher(root, ignore_file=".syncignore")
+            assert matcher.is_ignored("foo.pyc", is_dir=False) is True
+
+    def test_custom_ignore_file_with_dir_suffix(self):
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, ".syncignore"), "w") as f:
+                f.write("build/\n")
+            matcher = GitIgnoreMatcher(root, ignore_file=".syncignore")
+            assert matcher.is_ignored("build", is_dir=True) is True
+            assert matcher.is_ignored("build", is_dir=False) is False
+
 
 class TestScanDirectoryWithGitignore:
     def test_scan_ignores_files(self):

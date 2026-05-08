@@ -21,7 +21,7 @@ logger = logging.getLogger("orcasync")
 
 
 class SyncSession:
-    def __init__(self, root_path, reader, writer, loop, use_gitignore=True):
+    def __init__(self, root_path, reader, writer, loop, use_gitignore=True, ignore_file=None):
         self.root_path = os.path.abspath(root_path)
         self.reader = reader
         self.writer = writer
@@ -30,7 +30,7 @@ class SyncSession:
         self._running = True
         self._recv_task = None
         self._watcher = None
-        self._gitignore_matcher = GitIgnoreMatcher(root_path) if use_gitignore else None
+        self._gitignore_matcher = GitIgnoreMatcher(root_path, ignore_file=ignore_file) if use_gitignore else None
 
         self.local_manifest = {}
         self._remote_manifest = None
