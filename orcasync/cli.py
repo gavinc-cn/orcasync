@@ -23,10 +23,7 @@ def main():
         "--port", "-p", type=int, default=8384, help="Listen port (default: 8384)"
     )
     server_parser.add_argument(
-        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
-    )
-    server_parser.add_argument(
-        "--ignore-file", default=None, help="Custom ignore file name (e.g. .syncignore). If it exists, uses it exclusively; otherwise falls back to .gitignore"
+        "--no-gitignore", action="store_true", help="Disable .gitignore/.syncignore filtering"
     )
 
     client_parser = subparsers.add_parser("client", help="Start sync client")
@@ -43,20 +40,14 @@ def main():
         "--port", "-p", type=int, default=8384, help="Server port (default: 8384)"
     )
     client_parser.add_argument(
-        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
-    )
-    client_parser.add_argument(
-        "--ignore-file", default=None, help="Custom ignore file name (e.g. .syncignore). If it exists, uses it exclusively; otherwise falls back to .gitignore"
+        "--no-gitignore", action="store_true", help="Disable .gitignore/.syncignore filtering"
     )
 
     local_parser = subparsers.add_parser("local-sync", help="Sync two local folders directly (no TCP)")
     local_parser.add_argument("--src", "-s", required=True, help="Source folder path")
     local_parser.add_argument("--dst", "-d", required=True, help="Destination folder path")
     local_parser.add_argument(
-        "--no-gitignore", action="store_true", help="Disable .gitignore filtering"
-    )
-    local_parser.add_argument(
-        "--ignore-file", default=None, help="Custom ignore file name (e.g. .syncignore). If it exists, uses it exclusively; otherwise falls back to .gitignore"
+        "--no-gitignore", action="store_true", help="Disable .gitignore/.syncignore filtering"
     )
 
     args = parser.parse_args()
@@ -68,20 +59,19 @@ def main():
     )
 
     use_gitignore = not getattr(args, "no_gitignore", False)
-    ignore_file = getattr(args, "ignore_file", None)
 
     if args.command == "server":
         try:
-            asyncio.run(run_server(args.host, args.port, use_gitignore=use_gitignore, ignore_file=ignore_file))
+            asyncio.run(run_server(args.host, args.port, use_gitignore=use_gitignore))
         except KeyboardInterrupt:
             print("\nServer stopped.")
     elif args.command == "client":
         try:
-            asyncio.run(run_client(args.local, args.remote, args.host, args.port, use_gitignore=use_gitignore, ignore_file=ignore_file))
+            asyncio.run(run_client(args.local, args.remote, args.host, args.port, use_gitignore=use_gitignore))
         except KeyboardInterrupt:
             print("\nClient stopped.")
     elif args.command == "local-sync":
-        session = LocalSyncSession(args.src, args.dst, use_gitignore=use_gitignore, ignore_file=ignore_file)
+        session = LocalSyncSession(args.src, args.dst, use_gitignore=use_gitignore)
         try:
             asyncio.run(session.run())
         except KeyboardInterrupt:

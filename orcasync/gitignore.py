@@ -7,14 +7,16 @@ class GitIgnoreMatcher:
     Reads ignore files under root_path and provides is_ignored() matching
     exactly like Git.
 
-    Supports a custom ignore file (e.g. .syncignore). When specified:
-    - If the custom file exists at root, use it as the only ignore source
-    - If the custom file does not exist, fall back to recursive .gitignore files
+    Auto-detects .syncignore at root. When it exists:
+    - Use it as the only ignore source (applies recursively to all subdirs)
+    When .syncignore does not exist:
+    - Fall back to recursive .gitignore files
     """
 
-    def __init__(self, root_path, ignore_file=None):
+    SYNC_IGNORE_FILE = ".syncignore"
+
+    def __init__(self, root_path):
         self.root_path = os.path.abspath(root_path)
-        self.ignore_file = ignore_file
         self._specs = {}  # dir_rel_path -> GitIgnoreSpec
         self._load()
 
@@ -24,28 +26,27 @@ class GitIgnoreMatcher:
         base_spec = pathspec.GitIgnoreSpec.from_lines("gitignore", [".git/"])
         self._specs[""] = base_spec
 
-        # If a custom ignore file is specified and exists at root, use it exclusively
-        if self.ignore_file:
-            custom_path = os.path.join(self.root_path, self.ignore_file)
-            if os.path.isfile(custom_path):
-                try:
-                    with open(custom_path, "r", encoding="utf-8") as f:
-                        lines = [line.rstrip("\n\r") for line in f]
-                except (OSError, IOError):
-                    lines = []
-                custom_spec = pathspec.GitIgnoreSpec.from_lines("gitignore", lines)
-                combined = pathspec.GitIgnoreSpec(base_spec.patterns + custom_spec.patterns)
-                self._specs[""] = combined
-                # Propagate the same spec to all subdirectories
-                for dirpath, dirnames, _ in os.walk(self.root_path):
-                    rel_dir = os.path.relpath(dirpath, self.root_path)
-                    if rel_dir == ".":
-                        rel_dir = ""
-                    for dname in dirnames:
-                        child_rel = os.path.join(rel_dir, dname) if rel_dir else dname
-                        if child_rel not in self._specs:
-                            self._specs[child_rel] = combined
-                return
+        # If .syncignore exists at root, use it exclusively
+        syncignore_path = os.path.join(self.root_path, self.SYNC_IGNORE_FILE)
+        if os.path.isfile(syncignore_path):
+            try:
+                with open(syncignore_path, "r", encoding="utf-8") as f:
+                    lines = [line.rstrip("\n\r") for line in f]
+            except (OSError, IOError):
+                lines = []
+            custom_spec = pathspec.GitIgnoreSpec.from_lines("gitignore", lines)
+            combined = pathspec.GitIgnoreSpec(base_spec.patterns + custom_spec.patterns)
+            self._specs[""] = combined
+            # Propagate the same spec to all subdirectories
+            for dirpath, dirnames, _ in os.walk(self.root_path):
+                rel_dir = os.path.relpath(dirpath, self.root_path)
+                if rel_dir == ".":
+                    rel_dir = ""
+                for dname in dirnames:
+                    child_rel = os.path.join(rel_dir, dname) if rel_dir else dname
+                    if child_rel not in self._specs:
+                        self._specs[child_rel] = combined
+            return
 
         # Fall back to recursive .gitignore files
         for dirpath, dirnames, filenames in os.walk(self.root_path):

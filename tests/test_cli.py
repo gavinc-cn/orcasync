@@ -8,7 +8,7 @@ class TestCLI:
     def test_server_defaults(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["orcasync", "server"])
         monkeypatch.setattr(
-            "orcasync.cli.run_server", lambda h, p, use_gitignore=True, ignore_file=None: (_ for _ in ()).throw(SystemExit(0))
+            "orcasync.cli.run_server", lambda h, p, use_gitignore=True: (_ for _ in ()).throw(SystemExit(0))
         )
         with pytest.raises(SystemExit):
             main()
@@ -16,7 +16,7 @@ class TestCLI:
     def test_server_custom_host_port(self, monkeypatch):
         captured = {}
 
-        def fake_run_server(host, port, use_gitignore=True, ignore_file=None):
+        def fake_run_server(host, port, use_gitignore=True):
             captured["host"] = host
             captured["port"] = port
             raise SystemExit(0)
@@ -28,23 +28,10 @@ class TestCLI:
         assert captured["host"] == "1.2.3.4"
         assert captured["port"] == 9999
 
-    def test_server_ignore_file(self, monkeypatch):
-        captured = {}
-
-        def fake_run_server(host, port, use_gitignore=True, ignore_file=None):
-            captured["ignore_file"] = ignore_file
-            raise SystemExit(0)
-
-        monkeypatch.setattr(sys, "argv", ["orcasync", "server", "--ignore-file", ".syncignore"])
-        monkeypatch.setattr("orcasync.cli.run_server", fake_run_server)
-        with pytest.raises(SystemExit):
-            main()
-        assert captured["ignore_file"] == ".syncignore"
-
     def test_client_required_args(self, monkeypatch):
         monkeypatch.setattr(sys, "argv", ["orcasync", "client", "--local", "/tmp/a", "--remote", "/tmp/b"])
         monkeypatch.setattr(
-            "orcasync.cli.run_client", lambda l, r, h, p, use_gitignore=True, ignore_file=None: (_ for _ in ()).throw(SystemExit(0))
+            "orcasync.cli.run_client", lambda l, r, h, p, use_gitignore=True: (_ for _ in ()).throw(SystemExit(0))
         )
         with pytest.raises(SystemExit):
             main()
@@ -52,7 +39,7 @@ class TestCLI:
     def test_client_custom_host_port(self, monkeypatch):
         captured = {}
 
-        def fake_run_client(local, remote, host, port, use_gitignore=True, ignore_file=None):
+        def fake_run_client(local, remote, host, port, use_gitignore=True):
             captured.update(local=local, remote=remote, host=host, port=port)
             raise SystemExit(0)
 

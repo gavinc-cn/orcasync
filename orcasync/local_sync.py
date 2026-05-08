@@ -20,7 +20,7 @@ logger = logging.getLogger("orcasync")
 
 
 class LocalSyncSession:
-    def __init__(self, src_path, dst_path, use_gitignore=True, ignore_file=None):
+    def __init__(self, src_path, dst_path, use_gitignore=True):
         self.src_path = os.path.abspath(src_path)
         self.dst_path = os.path.abspath(dst_path)
         self._running = True
@@ -28,8 +28,8 @@ class LocalSyncSession:
         self._dst_watcher = None
         self._synced_files = {}
         self._lock = asyncio.Lock()
-        self._src_gitignore = GitIgnoreMatcher(self.src_path, ignore_file=ignore_file) if use_gitignore else None
-        self._dst_gitignore = GitIgnoreMatcher(self.dst_path, ignore_file=ignore_file) if use_gitignore else None
+        self._src_gitignore = GitIgnoreMatcher(self.src_path) if use_gitignore else None
+        self._dst_gitignore = GitIgnoreMatcher(self.dst_path) if use_gitignore else None
 
     async def run(self):
         await self.run_initial_sync()
