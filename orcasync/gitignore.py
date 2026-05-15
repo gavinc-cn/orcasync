@@ -22,8 +22,10 @@ class GitIgnoreMatcher:
 
     def _load(self):
         """Walk the directory tree and load ignore files."""
-        # Always ignore .git directory
-        base_spec = pathspec.GitIgnoreSpec.from_lines("gitignore", [".git/"])
+        # Always ignore .git and orcasync's own state directory
+        base_spec = pathspec.GitIgnoreSpec.from_lines(
+            "gitignore", [".git/", ".orcasync/"]
+        )
         self._specs[""] = base_spec
 
         # If .syncignore exists at root, use it exclusively

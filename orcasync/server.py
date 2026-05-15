@@ -4,27 +4,34 @@ import os
 
 from .protocol import send_message, recv_message
 from .session import SyncSession
+from .logging_util import log_event
 
-logger = logging.getLogger("orcasync")
+logger = logging.getLogger("orcasync.server")
 
 
 async def run_server(host="0.0.0.0", port=8384, use_gitignore=True):
-    logger.info("Server listening on %s:%d", host, port)
+    log_event(logger, logging.INFO, "server.listen", host=host, port=port)
 
     async def handle_client(reader, writer):
         addr = writer.get_extra_info("peername")
-        logger.info("Connection from %s", addr)
+        log_event(logger, logging.INFO, "server.connection", peer=str(addr))
         try:
             msg_type, data, _ = await recv_message(reader)
             if msg_type != "init":
-                logger.error("Expected init, got %s", msg_type)
+                log_event(
+                    logger, logging.ERROR, "server.bad_init",
+                    got=msg_type, peer=str(addr),
+                )
                 writer.close()
                 return
 
             remote_path = os.path.abspath(data["remote_path"])
             os.makedirs(remote_path, exist_ok=True)
             await send_message(writer, "init_ack", {"status": "ok"})
-            logger.info("Client syncing remote path: %s", remote_path)
+            log_event(
+                logger, logging.INFO, "server.init_ok",
+                peer=str(addr), root=remote_path,
+            )
 
             session = SyncSession(
                 remote_path, reader, writer, asyncio.get_running_loop(),
@@ -32,7 +39,7 @@ async def run_server(host="0.0.0.0", port=8384, use_gitignore=True):
             )
             await session.run_as_server()
         except Exception as e:
-            logger.error("Client handler error: %s", e)
+            log_event(logger, logging.ERROR, "server.handler_error", error=str(e))
         finally:
             if not writer.is_closing():
                 writer.close()

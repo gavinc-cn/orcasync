@@ -4,17 +4,18 @@ import os
 
 from .protocol import send_message, recv_message
 from .session import SyncSession
+from .logging_util import log_event
 
-logger = logging.getLogger("orcasync")
+logger = logging.getLogger("orcasync.client")
 
 
 async def run_client(local_path, remote_path, host, port, use_gitignore=True):
     local_path = os.path.abspath(local_path)
     os.makedirs(local_path, exist_ok=True)
 
-    logger.info("Connecting to %s:%d ...", host, port)
+    log_event(logger, logging.INFO, "client.connecting", host=host, port=port)
     reader, writer = await asyncio.open_connection(host, port)
-    logger.info("Connected to %s:%d", host, port)
+    log_event(logger, logging.INFO, "client.connected", host=host, port=port)
 
     try:
         await send_message(writer, "init", {"remote_path": remote_path})
@@ -23,11 +24,14 @@ async def run_client(local_path, remote_path, host, port, use_gitignore=True):
             recv_message(reader), timeout=10
         )
         if msg_type != "init_ack" or data.get("status") != "ok":
-            logger.error("Server rejected init: %s", data)
+            log_event(logger, logging.ERROR, "client.init_rejected", response=str(data))
             writer.close()
             return
 
-        logger.info("Server accepted, syncing local=%s remote=%s", local_path, remote_path)
+        log_event(
+            logger, logging.INFO, "client.init_ok",
+            local=local_path, remote=remote_path,
+        )
 
         session = SyncSession(
             local_path, reader, writer, asyncio.get_running_loop(),
@@ -35,11 +39,11 @@ async def run_client(local_path, remote_path, host, port, use_gitignore=True):
         )
         await session.run_as_client()
     except ConnectionRefusedError:
-        logger.error("Connection refused: %s:%d", host, port)
+        log_event(logger, logging.ERROR, "client.refused", host=host, port=port)
     except asyncio.TimeoutError:
-        logger.error("Timeout waiting for server response")
+        log_event(logger, logging.ERROR, "client.timeout")
     except Exception as e:
-        logger.error("Client error: %s", e)
+        log_event(logger, logging.ERROR, "client.error", error=str(e))
     finally:
         if not writer.is_closing():
             writer.close()

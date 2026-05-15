@@ -1,17 +1,28 @@
 import argparse
-import logging
 import asyncio
-import sys
 
 from .server import run_server
 from .client import run_client
 from .local_sync import LocalSyncSession
+from .logging_util import setup_logging
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="orcasync",
         description="orcasync - Bidirectional file synchronization tool",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Log level (default: INFO)",
+    )
+    parser.add_argument(
+        "--log-format",
+        default="text",
+        choices=["text", "json"],
+        help="Log format (default: text)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -52,11 +63,7 @@ def main():
 
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    setup_logging(level=args.log_level, fmt=args.log_format)
 
     use_gitignore = not getattr(args, "no_gitignore", False)
 

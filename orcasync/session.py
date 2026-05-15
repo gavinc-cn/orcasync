@@ -9,15 +9,18 @@ from .sync_engine import (
     diff_manifests,
     compute_file_blocks,
     read_block,
-    write_blocks,
     delete_path,
     ensure_dir,
     BLOCK_SIZE,
 )
+from .staging import StagingFile, clean_staging
 from .watcher import FileWatcher
 from .gitignore import GitIgnoreMatcher
+from .logging_util import log_event
 
-logger = logging.getLogger("orcasync")
+logger = logging.getLogger("orcasync.session")
+
+MAX_BLOCK_RETRIES = 3
 
 
 class SyncSession:
@@ -35,12 +38,18 @@ class SyncSession:
         self.local_manifest = {}
         self._remote_manifest = None
         self._manifest_event = asyncio.Event()
-        self._pending_blocks = {}
+        # path -> StagingFile for in-flight transfers (streaming write)
+        self._staging = {}
+        # path -> {index: retry_count} for block-level retry tracking
+        self._block_retries = {}
+        # path -> expected block hashes from manifest, used for verification
+        self._expected_block_hashes = {}
         self._pending_transfers = set()
         self._received_sync_done = False
         self._sync_event = asyncio.Event()
         self._initial_sync_done = False
         self._synced_files = {}
+        clean_staging(self.root_path)
 
     async def send(self, msg_type, data=None, payload=b""):
         async with self._send_lock:
@@ -52,40 +61,46 @@ class SyncSession:
     async def run_as_client(self):
         try:
             self._recv_task = asyncio.create_task(self._recv_loop())
+            log_event(logger, logging.INFO, "scan.start", role="client", root=self.root_path)
             self.local_manifest = scan_directory(self.root_path, gitignore_matcher=self._gitignore_matcher)
-            logger.info("Local manifest: %d files", len(self.local_manifest))
+            log_event(logger, logging.INFO, "scan.done", role="client", entries=len(self.local_manifest))
             await self.send("manifest", {"files": self.local_manifest})
-            logger.info("Waiting for remote manifest...")
             await self._manifest_event.wait()
-            logger.info("Remote manifest received: %d files", len(self._remote_manifest))
+            log_event(
+                logger, logging.INFO, "manifest.received",
+                role="client", entries=len(self._remote_manifest),
+            )
             await self._request_needed()
             await self._sync_event.wait()
             self._initial_sync_done = True
             self._start_watcher()
-            logger.info("Initial sync complete, real-time sync active")
+            log_event(logger, logging.INFO, "sync.initial_done", role="client")
             await self._recv_task
         except Exception as e:
-            logger.error("Session error: %s", e)
+            log_event(logger, logging.ERROR, "session.error", role="client", error=str(e))
         finally:
             self._cleanup()
 
     async def run_as_server(self):
         try:
             self._recv_task = asyncio.create_task(self._recv_loop())
-            logger.info("Waiting for client manifest...")
             await self._manifest_event.wait()
-            logger.info("Client manifest received: %d files", len(self._remote_manifest))
+            log_event(
+                logger, logging.INFO, "manifest.received",
+                role="server", entries=len(self._remote_manifest),
+            )
+            log_event(logger, logging.INFO, "scan.start", role="server", root=self.root_path)
             self.local_manifest = scan_directory(self.root_path, gitignore_matcher=self._gitignore_matcher)
-            logger.info("Local manifest: %d files", len(self.local_manifest))
+            log_event(logger, logging.INFO, "scan.done", role="server", entries=len(self.local_manifest))
             await self.send("manifest", {"files": self.local_manifest})
             await self._request_needed()
             await self._sync_event.wait()
             self._initial_sync_done = True
             self._start_watcher()
-            logger.info("Initial sync complete, real-time sync active")
+            log_event(logger, logging.INFO, "sync.initial_done", role="server")
             await self._recv_task
         except Exception as e:
-            logger.error("Session error: %s", e)
+            log_event(logger, logging.ERROR, "session.error", role="server", error=str(e))
         finally:
             self._cleanup()
 
@@ -94,16 +109,41 @@ class SyncSession:
         file_needs = [n for n in needs if not n.get("is_dir")]
         dir_needs = [n for n in needs if n.get("is_dir")]
         self._pending_transfers = {n["path"] for n in file_needs}
-        logger.info("Need to pull %d files and %d dirs from remote", len(file_needs), len(dir_needs))
+        total_bytes = sum(
+            self._remote_manifest.get(n["path"], {}).get("size", 0) or 0
+            for n in file_needs
+        )
+        log_event(
+            logger,
+            logging.INFO,
+            "diff.done",
+            files_to_pull=len(file_needs),
+            dirs_to_pull=len(dir_needs),
+            bytes_to_transfer=total_bytes,
+        )
         # Create directories immediately (no need to request blocks)
         for need in dir_needs:
             ensure_dir(self.root_path, need["path"])
-            logger.info("Created dir: %s", need["path"])
+            log_event(logger, logging.INFO, "dir.created", path=need["path"])
         for need in file_needs:
+            path = need["path"]
+            # Cache expected per-block hashes from the remote manifest so we
+            # can verify each incoming block payload end-to-end.
+            remote_info = self._remote_manifest.get(path, {})
+            blocks = remote_info.get("blocks", []) or []
+            self._expected_block_hashes[path] = {
+                b["index"]: b["hash"] for b in blocks
+            }
+            # Pre-create the staging file so we can stream blocks straight
+            # to disk instead of buffering the whole file in memory.
+            expected_size = remote_info.get("size", 0) or 0
+            self._staging[path] = StagingFile(
+                self.root_path, path, expected_size=expected_size
+            )
             indices = need["block_indices"]
             await self.send(
                 "request_blocks",
-                {"path": need["path"], "indices": indices if indices else "all"},
+                {"path": path, "indices": indices if indices else "all"},
             )
         if not file_needs and not dir_needs:
             await self.send("sync_done", {})
@@ -126,7 +166,10 @@ class SyncSession:
                 try:
                     await handler(data, payload)
                 except Exception as e:
-                    logger.error("Error handling %s: %s", msg_type, e)
+                    log_event(
+                        logger, logging.ERROR, "handler.error",
+                        msg_type=msg_type, error=str(e),
+                    )
         self._running = False
 
     async def _handle_manifest(self, data, _payload):
@@ -142,9 +185,12 @@ class SyncSession:
             await self.send("transfer_done", {"path": path, "size": 0})
             return
 
+        # Compute hashes so the receiver can verify each block end-to-end.
+        all_blocks = compute_file_blocks(filepath)
+        hash_by_index = {b["index"]: b["hash"] for b in all_blocks}
+
         if indices == "all":
-            blocks = compute_file_blocks(filepath)
-            indices = [b["index"] for b in blocks]
+            indices = [b["index"] for b in all_blocks]
 
         file_size = os.path.getsize(filepath)
 
@@ -152,7 +198,9 @@ class SyncSession:
             block = read_block(self.root_path, path, idx)
             if block is not None:
                 await self.send(
-                    "block_data", {"path": path, "index": idx}, payload=block
+                    "block_data",
+                    {"path": path, "index": idx, "hash": hash_by_index.get(idx)},
+                    payload=block,
                 )
 
         await self.send("transfer_done", {"path": path, "size": file_size})
@@ -160,26 +208,79 @@ class SyncSession:
     async def _handle_block_data(self, data, payload):
         path = data["path"]
         index = data["index"]
-        if path not in self._pending_blocks:
-            self._pending_blocks[path] = []
-        self._pending_blocks[path].append((index, payload))
+        block_hash = data.get("hash")
+        # Fall back to the manifest-cached expected hash if the sender's
+        # message didn't include one (legacy peer).
+        if block_hash is None:
+            block_hash = self._expected_block_hashes.get(path, {}).get(index)
+
+        st = self._staging.get(path)
+        if st is None:
+            # Late delivery for a file we already gave up on; ignore.
+            return
+
+        if st.write_block(index, payload, expected_hash=block_hash):
+            return
+
+        # Hash mismatch: ask the sender to retransmit this single block,
+        # up to MAX_BLOCK_RETRIES times.
+        retries = self._block_retries.setdefault(path, {})
+        retries[index] = retries.get(index, 0) + 1
+        if retries[index] > MAX_BLOCK_RETRIES:
+            log_event(
+                logger,
+                logging.ERROR,
+                "block.gave_up",
+                path=path,
+                index=index,
+                retries=retries[index],
+            )
+            st.abort(reason="block_hash_mismatch_exhausted")
+            self._staging.pop(path, None)
+            self._pending_transfers.discard(path)
+            self._check_sync_complete()
+            return
+        log_event(
+            logger,
+            logging.WARNING,
+            "block.retry",
+            path=path,
+            index=index,
+            retry=retries[index],
+        )
+        await self.send("request_blocks", {"path": path, "indices": [index]})
 
     async def _handle_transfer_done(self, data, _payload):
         path = data["path"]
         size = data.get("size")
-        if path in self._pending_blocks:
-            self._synced_files[path] = time.time()
-            write_blocks(
-                self.root_path,
-                path,
-                self._pending_blocks.pop(path),
-                expected_size=size,
-            )
-            logger.info("Synced: %s", path)
+        st = self._staging.pop(path, None)
+        self._expected_block_hashes.pop(path, None)
+        self._block_retries.pop(path, None)
+        if st is not None:
+            # The receiver's expected_size came from the remote manifest at
+            # request time; trust the sender's authoritative final size here.
+            if size is not None:
+                st.expected_size = size
+            try:
+                st.commit()
+                self._synced_files[path] = time.time()
+            except Exception as e:
+                log_event(
+                    logger, logging.ERROR, "transfer.commit_failed",
+                    path=path, error=str(e),
+                )
         elif size == 0:
-            self._synced_files[path] = time.time()
-            write_blocks(self.root_path, path, [], expected_size=0)
-            logger.info("Synced: %s", path)
+            # Empty file: no block_data arrived, write directly via a
+            # zero-byte StagingFile commit for consistency.
+            empty = StagingFile(self.root_path, path, expected_size=0)
+            try:
+                empty.commit()
+                self._synced_files[path] = time.time()
+            except Exception as e:
+                log_event(
+                    logger, logging.ERROR, "transfer.commit_failed",
+                    path=path, error=str(e),
+                )
         self._pending_transfers.discard(path)
         if not self._pending_transfers and not self._initial_sync_done:
             await self.send("sync_done", {})
@@ -205,17 +306,21 @@ class SyncSession:
         if event == "delete":
             self._synced_files[path] = time.time()
             delete_path(self.root_path, path)
-            logger.info("Remote delete: %s", path)
+            log_event(logger, logging.INFO, "remote.delete", path=path, is_dir=is_dir)
         elif event == "create" and is_dir:
             full = os.path.join(self.root_path, path)
             os.makedirs(full, exist_ok=True)
-            logger.info("Remote mkdir: %s", path)
+            log_event(logger, logging.INFO, "remote.mkdir", path=path)
         elif event in ("create", "modify") and not is_dir:
             remote_mtime = data.get("mtime", 0)
             fpath = os.path.join(self.root_path, path)
             if os.path.exists(fpath) and not os.path.isdir(fpath):
                 local_mtime = os.path.getmtime(fpath)
                 if local_mtime > remote_mtime:
+                    log_event(
+                        logger, logging.DEBUG, "remote.skipped_newer_local",
+                        path=path, local_mtime=local_mtime, remote_mtime=remote_mtime,
+                    )
                     return
 
             block_hashes = data.get("block_hashes", [])
@@ -229,23 +334,35 @@ class SyncSession:
                 for i, h in enumerate(block_hashes)
                 if h != local_hash_map.get(i)
             ]
+            expected_size = data.get("size")
 
             if needed:
                 self._pending_transfers.add(path)
+                self._expected_block_hashes[path] = {
+                    i: h for i, h in enumerate(block_hashes)
+                }
+                # Staging seeds from the existing target file, so unchanged
+                # blocks are preserved automatically; we only need to write
+                # the blocks the remote will send us.
+                self._staging[path] = StagingFile(
+                    self.root_path, path, expected_size=expected_size,
+                )
                 await self.send(
                     "request_blocks",
                     {"path": path, "indices": needed},
                 )
             else:
                 self._synced_files[path] = time.time()
-                expected_size = data.get("size")
                 if expected_size is not None:
                     if not os.path.exists(fpath):
                         open(fpath, "wb").close()
                     if os.path.isfile(fpath):
                         with open(fpath, "r+b") as f:
                             f.truncate(expected_size)
-                    logger.info("File already in sync: %s", path)
+                    log_event(
+                        logger, logging.INFO, "remote.already_in_sync",
+                        path=path, size=expected_size,
+                    )
 
     def _start_watcher(self):
         self._watcher = FileWatcher(
@@ -253,18 +370,25 @@ class SyncSession:
             gitignore_matcher=self._gitignore_matcher,
         )
         self._watcher.start()
-        logger.info("File watcher started for: %s", self.root_path)
+        log_event(logger, logging.INFO, "watcher.started", root=self.root_path)
 
     async def _on_file_change(self, event_type, rel_path, is_dir):
         if rel_path in self._synced_files:
             if time.time() - self._synced_files[rel_path] < 2.0:
+                log_event(
+                    logger, logging.DEBUG, "echo.suppressed",
+                    path=rel_path, reason="apply_window",
+                )
                 return
             del self._synced_files[rel_path]
 
         if not self._running:
             return
 
-        logger.info("Local change: %s %s", event_type, rel_path)
+        log_event(
+            logger, logging.INFO, "local.change",
+            event=event_type, path=rel_path, is_dir=is_dir,
+        )
 
         if event_type == "delete":
             await self.send(
@@ -302,4 +426,4 @@ class SyncSession:
                 self.writer.close()
             except Exception:
                 pass
-        logger.info("Session closed")
+        log_event(logger, logging.INFO, "session.closed")

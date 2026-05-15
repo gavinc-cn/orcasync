@@ -3,6 +3,8 @@ import hashlib
 
 BLOCK_SIZE = 128 * 1024  # 128KB
 
+STATE_DIR = ".orcasync"  # internal state (manifest cache, staging) — never synced
+
 
 def normalize_path(path):
     """Normalize path to use forward slashes for cross-platform consistency."""
@@ -40,6 +42,10 @@ def scan_directory(root_path, gitignore_matcher=None):
         rel_dir = os.path.relpath(dirpath, root)
         if rel_dir == ".":
             rel_dir = ""
+
+        # Always skip internal state directory, even without gitignore.
+        if STATE_DIR in dirnames:
+            dirnames.remove(STATE_DIR)
 
         # Filter out ignored directories to prevent descending into them
         if gitignore_matcher is not None:
