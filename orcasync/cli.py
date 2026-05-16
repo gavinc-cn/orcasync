@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import os
 
 from .server import run_server
 from .client import run_client
@@ -13,6 +14,17 @@ def main():
         description="orcasync - Bidirectional file synchronization tool",
     )
     parser.add_argument(
+        "--name",
+        default=None,
+        metavar="NAME",
+        help=(
+            "Instance name. Included in the log filename to distinguish "
+            "multiple orcasync instances running on the same machine "
+            "(e.g. --name work, --name backup). "
+            "Also available as {name} in --log-file."
+        ),
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -23,6 +35,26 @@ def main():
         default="text",
         choices=["text", "json"],
         help="Log format (default: text)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Log file path (rotates daily at midnight, keeps --log-backup-count days). "
+            "Defaults to logs/orcasync.log (or logs/orcasync-NAME.log when --name is set) "
+            "in the current directory. "
+            "PID is injected before the extension automatically so each process writes "
+            "to its own file (e.g. orcasync.log -> orcasync.12345.log). "
+            "Supports {name}, {role}, and {pid} placeholders."
+        ),
+    )
+    parser.add_argument(
+        "--log-backup-count",
+        type=int,
+        default=30,
+        metavar="N",
+        help="Number of daily log backup files to keep (default: 30)",
     )
     parser.add_argument(
         "--rescan-interval-s",
@@ -85,7 +117,22 @@ def main():
 
     args = parser.parse_args()
 
-    setup_logging(level=args.log_level, fmt=args.log_format)
+    # Compute default log file path when --log-file is not specified.
+    # With --name: logs/orcasync-NAME.log
+    # Without --name: logs/orcasync.log
+    log_file = args.log_file
+    if log_file is None:
+        name_part = f"-{args.name}" if args.name else ""
+        log_file = os.path.join("logs", f"orcasync{name_part}.log")
+
+    setup_logging(
+        level=args.log_level,
+        fmt=args.log_format,
+        log_file=log_file,
+        log_backup_count=args.log_backup_count,
+        role=args.command,
+        name=args.name,
+    )
 
     use_gitignore = not getattr(args, "no_gitignore", False)
 
