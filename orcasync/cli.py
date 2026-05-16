@@ -75,6 +75,13 @@ def main():
     local_parser.add_argument(
         "--no-gitignore", action="store_true", help="Disable .gitignore/.syncignore filtering"
     )
+    local_parser.add_argument(
+        "--fast-start", action="store_true", default=False,
+        help="Skip hashing during initial scan; use mtime+size only. "
+             "Starts syncing in seconds but hash verification is degraded "
+             "until background rebuild completes. Risk: silent corruption "
+             "undetectable if mtime matches but content differs.",
+    )
 
     args = parser.parse_args()
 
@@ -111,6 +118,7 @@ def main():
             use_gitignore=use_gitignore,
             rescan_interval_s=rescan_s,
             state_dir=state_dir,
+            fast_start=args.fast_start,
         )
         try:
             asyncio.run(session.run())

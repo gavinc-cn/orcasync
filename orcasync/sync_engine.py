@@ -38,19 +38,26 @@ def compute_file_blocks(filepath):
     return blocks
 
 
-def scan_directory(root_path, gitignore_matcher=None, known_manifest=None):
+def scan_directory(root_path, gitignore_matcher=None, known_manifest=None,
+                   mtime_only=False):
     """Scan *root_path* and return a manifest dict.
 
-    When *known_manifest* is supplied, files whose (size, mtime) match the
-    cached entry skip content-reading entirely — only changed or new files are
-    hashed.  This turns a periodic rescan on a large network drive from an
-    O(total-bytes) operation into a mostly-stat operation.
+    *known_manifest* cache: files whose (size, mtime) match a cached entry with
+    confirmed block hashes skip content-reading — only changed/new files are
+    hashed.  Turns periodic rescans on large network drives into mostly-stat
+    operations.
+
+    *mtime_only*: when True, files that miss the cache get ``blocks=None``
+    instead of being hashed.  Use for fast initial startup; call
+    ``_rebuild_hashes`` in the background to fill in the hashes afterward.
+    Only confirmed (non-None) cache entries are ever reused.
     """
     root = os.path.abspath(root_path)
     os.makedirs(root, exist_ok=True)
     manifest = {}
     cache_hits = 0
     cache_misses = 0
+    mtime_skips = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
@@ -92,11 +99,16 @@ def scan_directory(root_path, gitignore_matcher=None, known_manifest=None):
             try:
                 stat = os.stat(fpath)
                 cached = known_manifest.get(rel_path) if known_manifest else None
+                # Only reuse cache entries with confirmed (non-None) block hashes.
                 if (cached and not cached.get("is_dir")
+                        and cached.get("blocks") is not None
                         and cached.get("size") == stat.st_size
                         and cached.get("mtime") == stat.st_mtime):
                     blocks = cached["blocks"]
                     cache_hits += 1
+                elif mtime_only:
+                    blocks = None  # deferred; caller must run _rebuild_hashes
+                    mtime_skips += 1
                 else:
                     blocks = compute_file_blocks(fpath)
                     cache_misses += 1
@@ -110,11 +122,11 @@ def scan_directory(root_path, gitignore_matcher=None, known_manifest=None):
             except (OSError, IOError):
                 continue
 
-    if known_manifest is not None:
+    if known_manifest is not None or mtime_only:
         log_event(
             logger, logging.DEBUG, "scan.cache_stats",
-            root=root, hits=cache_hits, misses=cache_misses,
-            hit_rate=f"{cache_hits * 100 // max(cache_hits + cache_misses, 1)}%",
+            root=root, hits=cache_hits, misses=cache_misses, mtime_skips=mtime_skips,
+            hit_rate=f"{cache_hits * 100 // max(cache_hits + cache_misses + mtime_skips, 1)}%",
         )
 
     return manifest
@@ -132,14 +144,25 @@ def diff_manifests(local_manifest, remote_manifest):
         if local_info is None or local_info.get("is_dir"):
             needs.append({"path": path, "block_indices": None})
             continue
-        if _same_blocks(local_info.get("blocks", []), remote_info.get("blocks", [])):
+        local_blocks = local_info.get("blocks")
+        remote_blocks = remote_info.get("blocks")
+        # mtime-only mode: no block data available, fall back to size+mtime.
+        if local_blocks is None or remote_blocks is None:
+            if (local_info.get("size") == remote_info.get("size")
+                    and local_info.get("mtime") == remote_info.get("mtime")):
+                continue
+            if remote_info.get("mtime", 0) <= local_info.get("mtime", 0):
+                continue
+            needs.append({"path": path, "block_indices": None})
+            continue
+        if _same_blocks(local_blocks, remote_blocks):
             continue
         if remote_info.get("mtime", 0) <= local_info.get("mtime", 0):
             continue
-        local_hashes = {b["index"]: b["hash"] for b in local_info.get("blocks", [])}
+        local_hashes = {b["index"]: b["hash"] for b in local_blocks}
         changed = [
             b["index"]
-            for b in remote_info.get("blocks", [])
+            for b in remote_blocks
             if b["hash"] != local_hashes.get(b["index"])
         ]
         if changed:

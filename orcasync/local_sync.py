@@ -1,30 +1,33 @@
-import os
-import time
 import asyncio
 import logging
+import os
+import time
 
-from .sync_engine import (
-    scan_directory,
-    diff_manifests,
-    compute_file_blocks,
-    read_block,
-    delete_path,
-    ensure_dir,
-    BLOCK_SIZE,
-)
-from .staging import StagingFile, clean_staging
-from .watcher import FileWatcher
+from .conflict import detect_conflict, preserve_local_as_conflict
 from .gitignore import GitIgnoreMatcher
 from .logging_util import log_event
-from .conflict import detect_conflict, preserve_local_as_conflict
-from .rescanner import PeriodicRescanner, DEFAULT_INTERVAL_S as RESCAN_INTERVAL_S
+from .manifest_db import ManifestDB, db_path_for
+from .rescanner import DEFAULT_INTERVAL_S as RESCAN_INTERVAL_S
+from .rescanner import PeriodicRescanner
+from .staging import StagingFile, clean_staging
+from .sync_engine import (
+    BLOCK_SIZE,
+    compute_file_blocks,
+    delete_path,
+    diff_manifests,
+    ensure_dir,
+    read_block,
+    scan_directory,
+)
+from .watcher import FileWatcher
 
 logger = logging.getLogger("orcasync.local")
 
 
 class LocalSyncSession:
     def __init__(self, src_path, dst_path, use_gitignore=True,
-                 rescan_interval_s=RESCAN_INTERVAL_S, state_dir=None):
+                 rescan_interval_s=RESCAN_INTERVAL_S, state_dir=None,
+                 fast_start=False):
         self.src_path = os.path.abspath(src_path)
         self.dst_path = os.path.abspath(dst_path)
         self._running = True
@@ -36,12 +39,13 @@ class LocalSyncSession:
         self._synced_files = {}
         self._lock = asyncio.Lock()
         self._state_dir = os.path.abspath(state_dir) if state_dir else None
+        self._fast_start = fast_start
         self._src_gitignore = GitIgnoreMatcher(self.src_path) if use_gitignore else None
         self._dst_gitignore = GitIgnoreMatcher(self.dst_path) if use_gitignore else None
-        # Remember the manifest from the last successful sync so the
-        # rescanner can spot drift relative to the agreed state.
         self._src_baseline = {}
         self._dst_baseline = {}
+        self._src_db = None
+        self._dst_db = None
 
     async def run(self):
         await self.run_initial_sync()
@@ -50,25 +54,53 @@ class LocalSyncSession:
             logger, logging.INFO, "local.active",
             src=self.src_path, dst=self.dst_path,
         )
-        # Keep running until stopped
+        if self._fast_start:
+            asyncio.get_running_loop().create_task(self._rebuild_hashes())
         while self._running:
             await asyncio.sleep(1)
+
+    def _open_db(self, root_path):
+        db = ManifestDB(db_path_for(root_path, self._state_dir))
+        try:
+            db.open()
+        except Exception as e:
+            log_event(logger, logging.WARNING, "manifest_db.open_failed",
+                      root=root_path, error=str(e))
+            return None
+        return db
 
     async def run_initial_sync(self):
         clean_staging(self.src_path, self._state_dir)
         clean_staging(self.dst_path, self._state_dir)
+
+        self._src_db = self._open_db(self.src_path)
+        self._dst_db = self._open_db(self.dst_path)
+        src_cached = self._src_db.load() if self._src_db else {}
+        dst_cached = self._dst_db.load() if self._dst_db else {}
+        if src_cached:
+            log_event(logger, logging.INFO, "manifest_db.cache_loaded",
+                      root=self.src_path, entries=len(src_cached))
+        if dst_cached:
+            log_event(logger, logging.INFO, "manifest_db.cache_loaded",
+                      root=self.dst_path, entries=len(dst_cached))
+        if self._fast_start:
+            log_event(logger, logging.WARNING, "fast_start.active",
+                      note="mtime-only scan; hash verification degraded until rebuild completes")
+
         log_event(logger, logging.INFO, "scan.start", root=self.src_path, role="src")
-        src_manifest = scan_directory(self.src_path, gitignore_matcher=self._src_gitignore)
-        log_event(
-            logger, logging.INFO, "scan.done",
-            root=self.src_path, role="src", entries=len(src_manifest),
+        src_manifest = scan_directory(
+            self.src_path, gitignore_matcher=self._src_gitignore,
+            known_manifest=src_cached or None, mtime_only=self._fast_start,
         )
+        log_event(logger, logging.INFO, "scan.done",
+                  root=self.src_path, role="src", entries=len(src_manifest))
         log_event(logger, logging.INFO, "scan.start", root=self.dst_path, role="dst")
-        dst_manifest = scan_directory(self.dst_path, gitignore_matcher=self._dst_gitignore)
-        log_event(
-            logger, logging.INFO, "scan.done",
-            root=self.dst_path, role="dst", entries=len(dst_manifest),
+        dst_manifest = scan_directory(
+            self.dst_path, gitignore_matcher=self._dst_gitignore,
+            known_manifest=dst_cached or None, mtime_only=self._fast_start,
         )
+        log_event(logger, logging.INFO, "scan.done",
+                  root=self.dst_path, role="dst", entries=len(dst_manifest))
 
         # Sync dst -> src (src is the "local" side that may need conflict preservation)
         src_needs = diff_manifests(src_manifest, dst_manifest)
@@ -107,26 +139,66 @@ class LocalSyncSession:
                 await self._pull_file(self.src_path, self.dst_path, need, src_manifest)
 
         log_event(logger, logging.INFO, "sync.initial_done")
-        # After the initial sync both roots should be in agreement; record
-        # post-sync manifests as baselines for drift detection.
+
+        # Save confirmed hashes to DB before baseline scan.
+        if self._src_db:
+            self._src_db.save_many(src_manifest)
+        if self._dst_db:
+            self._dst_db.save_many(dst_manifest)
+
         log_event(logger, logging.INFO, "scan.start", root=self.src_path, role="src", type="baseline")
         self._src_baseline = scan_directory(
             self.src_path, gitignore_matcher=self._src_gitignore,
-            known_manifest=src_manifest,
+            known_manifest=src_manifest, mtime_only=self._fast_start,
         )
         log_event(logger, logging.INFO, "scan.done", root=self.src_path, role="src", type="baseline", entries=len(self._src_baseline))
         log_event(logger, logging.INFO, "scan.start", root=self.dst_path, role="dst", type="baseline")
         self._dst_baseline = scan_directory(
             self.dst_path, gitignore_matcher=self._dst_gitignore,
-            known_manifest=dst_manifest,
+            known_manifest=dst_manifest, mtime_only=self._fast_start,
         )
         log_event(logger, logging.INFO, "scan.done", root=self.dst_path, role="dst", type="baseline", entries=len(self._dst_baseline))
+
+    async def _rebuild_hashes(self):
+        """Background task (fast-start only): compute hashes for mtime-only entries.
+
+        Updates baselines in-place so the rescanner's _known also benefits
+        (seed_known does a shallow copy, so dict values are shared references).
+        Saves confirmed hashes to the DB when done.
+        """
+        total = sum(
+            1 for info in list(self._src_baseline.values()) + list(self._dst_baseline.values())
+            if not info.get("is_dir") and info.get("blocks") is None
+        )
+        log_event(logger, logging.INFO, "hash_rebuild.start", files=total)
+        done = 0
+        for manifest, root, db in [
+            (self._src_baseline, self.src_path, self._src_db),
+            (self._dst_baseline, self.dst_path, self._dst_db),
+        ]:
+            for path, info in manifest.items():
+                if info.get("is_dir") or info.get("blocks") is not None:
+                    continue
+                fpath = os.path.join(root, path.replace("/", os.sep))
+                if os.path.isfile(fpath):
+                    info["blocks"] = compute_file_blocks(fpath)
+                    done += 1
+                await asyncio.sleep(0)  # yield to event loop between files
+            if db:
+                db.save_many(manifest)
+        log_event(logger, logging.INFO, "hash_rebuild.done",
+                  hashed=done,
+                  note="hash verification fully restored")
 
     async def _pull_file(self, from_root, to_root, need, from_manifest):
         path = need["path"]
         indices = need.get("block_indices")
         info = from_manifest.get(path, {})
         expected_size = info.get("size", 0) or 0
+        # Compute blocks on demand when source was scanned mtime-only.
+        if info.get("blocks") is None:
+            fpath = os.path.join(from_root, path.replace("/", os.sep))
+            info["blocks"] = compute_file_blocks(fpath)  # update manifest in-place
         hashes = {b["index"]: b["hash"] for b in info.get("blocks", [])}
 
         st = StagingFile(to_root, path, expected_size=expected_size, state_dir=self._state_dir)
@@ -233,3 +305,7 @@ class LocalSyncSession:
             self._src_rescanner.stop()
         if self._dst_rescanner:
             self._dst_rescanner.stop()
+        if self._src_db:
+            self._src_db.close()
+        if self._dst_db:
+            self._dst_db.close()
