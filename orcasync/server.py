@@ -10,7 +10,7 @@ logger = logging.getLogger("orcasync.server")
 
 
 async def run_server(host="0.0.0.0", port=8384, use_gitignore=True,
-                     rescan_interval_s=600):
+                     rescan_interval_s=600, state_dir=None):
     log_event(logger, logging.INFO, "server.listen", host=host, port=port)
 
     async def handle_client(reader, writer):
@@ -38,6 +38,7 @@ async def run_server(host="0.0.0.0", port=8384, use_gitignore=True,
                 remote_path, reader, writer, asyncio.get_running_loop(),
                 use_gitignore=use_gitignore,
                 rescan_interval_s=rescan_interval_s,
+                state_dir=state_dir,
             )
             await session.run_as_server()
         except Exception as e:

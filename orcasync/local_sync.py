@@ -24,7 +24,7 @@ logger = logging.getLogger("orcasync.local")
 
 class LocalSyncSession:
     def __init__(self, src_path, dst_path, use_gitignore=True,
-                 rescan_interval_s=RESCAN_INTERVAL_S):
+                 rescan_interval_s=RESCAN_INTERVAL_S, state_dir=None):
         self.src_path = os.path.abspath(src_path)
         self.dst_path = os.path.abspath(dst_path)
         self._running = True
@@ -35,6 +35,7 @@ class LocalSyncSession:
         self._rescan_interval_s = rescan_interval_s
         self._synced_files = {}
         self._lock = asyncio.Lock()
+        self._state_dir = os.path.abspath(state_dir) if state_dir else None
         self._src_gitignore = GitIgnoreMatcher(self.src_path) if use_gitignore else None
         self._dst_gitignore = GitIgnoreMatcher(self.dst_path) if use_gitignore else None
         # Remember the manifest from the last successful sync so the
@@ -54,8 +55,8 @@ class LocalSyncSession:
             await asyncio.sleep(1)
 
     async def run_initial_sync(self):
-        clean_staging(self.src_path)
-        clean_staging(self.dst_path)
+        clean_staging(self.src_path, self._state_dir)
+        clean_staging(self.dst_path, self._state_dir)
         log_event(logger, logging.INFO, "scan.start", root=self.src_path, role="src")
         src_manifest = scan_directory(self.src_path, gitignore_matcher=self._src_gitignore)
         log_event(
@@ -122,7 +123,7 @@ class LocalSyncSession:
         expected_size = info.get("size", 0) or 0
         hashes = {b["index"]: b["hash"] for b in info.get("blocks", [])}
 
-        st = StagingFile(to_root, path, expected_size=expected_size)
+        st = StagingFile(to_root, path, expected_size=expected_size, state_dir=self._state_dir)
         try:
             if indices is None:
                 # All blocks need to be copied (file is new or fully changed).
@@ -197,7 +198,7 @@ class LocalSyncSession:
             if os.path.isfile(fpath):
                 blocks = compute_file_blocks(fpath)
                 size = os.path.getsize(fpath)
-                st = StagingFile(to_root, rel_path, expected_size=size)
+                st = StagingFile(to_root, rel_path, expected_size=size, state_dir=self._state_dir)
                 try:
                     for b in blocks:
                         idx = b["index"]

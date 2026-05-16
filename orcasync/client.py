@@ -10,7 +10,7 @@ logger = logging.getLogger("orcasync.client")
 
 
 async def run_client(local_path, remote_path, host, port, use_gitignore=True,
-                     rescan_interval_s=600):
+                     rescan_interval_s=600, state_dir=None):
     local_path = os.path.abspath(local_path)
     os.makedirs(local_path, exist_ok=True)
 
@@ -38,6 +38,7 @@ async def run_client(local_path, remote_path, host, port, use_gitignore=True,
             local_path, reader, writer, asyncio.get_running_loop(),
             use_gitignore=use_gitignore,
             rescan_interval_s=rescan_interval_s,
+            state_dir=state_dir,
         )
         await session.run_as_client()
     except ConnectionRefusedError:

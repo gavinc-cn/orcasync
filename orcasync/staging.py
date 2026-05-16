@@ -1,17 +1,21 @@
 """Streaming staging writer for incoming file transfers.
 
-Blocks are written into <root>/.orcasync/staging/<token>.partial as they
+Blocks are written into <state_dir>/staging/<token>.partial as they
 arrive (no in-memory buffering of the full file). On transfer completion
-the staged file is atomically renamed into place.
+the staged file is atomically renamed into place.  When the staging
+directory lives on a different filesystem than the target (cross-device),
+commit() falls back to copy+delete so callers never see EXDEV errors.
 
 A per-block SHA-256 may be supplied by the sender; if so it is verified
 before the block is written and a hash mismatch is reported back to the
 caller so it can request a retransmit.
 """
 
+import errno
 import hashlib
 import logging
 import os
+import shutil
 import time
 import uuid
 
@@ -21,13 +25,14 @@ from .sync_engine import BLOCK_SIZE, STATE_DIR, ensure_parent_dir
 logger = logging.getLogger("orcasync.staging")
 
 
-def staging_dir(root_path):
-    return os.path.join(root_path, STATE_DIR, "staging")
+def staging_dir(root_path, state_dir=None):
+    base = state_dir if state_dir else os.path.join(root_path, STATE_DIR)
+    return os.path.join(base, "staging")
 
 
-def clean_staging(root_path):
+def clean_staging(root_path, state_dir=None):
     """Remove stray .partial files left by crashed sessions."""
-    d = staging_dir(root_path)
+    d = staging_dir(root_path, state_dir)
     if not os.path.isdir(d):
         return
     removed = 0
@@ -52,16 +57,16 @@ class StagingFile:
         # or st.abort() to discard
     """
 
-    def __init__(self, root_path, rel_path, expected_size=None, seed_from_existing=True):
+    def __init__(self, root_path, rel_path, expected_size=None, seed_from_existing=True,
+                 state_dir=None):
         self.root_path = os.path.abspath(root_path)
         self.rel_path = rel_path
         self.expected_size = expected_size
         self._target = os.path.join(self.root_path, rel_path.replace("/", os.sep))
         self._token = uuid.uuid4().hex
-        self._partial = os.path.join(
-            staging_dir(self.root_path), f"{self._token}.partial"
-        )
-        os.makedirs(staging_dir(self.root_path), exist_ok=True)
+        self._sdir = staging_dir(self.root_path, state_dir)
+        self._partial = os.path.join(self._sdir, f"{self._token}.partial")
+        os.makedirs(self._sdir, exist_ok=True)
         # Seed the staging file with the current target's contents so that
         # block-level delta updates only need to overwrite changed blocks
         # and unchanged regions are preserved automatically.
@@ -140,7 +145,13 @@ class StagingFile:
         finally:
             self._fh.close()
         ensure_parent_dir(self.root_path, self.rel_path)
-        os.replace(self._partial, self._target)
+        try:
+            os.replace(self._partial, self._target)
+        except OSError as exc:
+            if exc.errno != errno.EXDEV:
+                raise
+            shutil.copy2(self._partial, self._target)
+            os.remove(self._partial)
         duration_ms = int((time.time() - self._opened_at) * 1000)
         log_event(
             logger,

@@ -31,6 +31,14 @@ def main():
         help="Periodic incremental rescan interval in seconds (default: 600; "
              "0 disables the rescanner)",
     )
+    parser.add_argument(
+        "--state-dir",
+        default=None,
+        metavar="DIR",
+        help="External directory for orcasync state (staging files). "
+             "Defaults to <sync-root>/.orcasync. Use this when the sync "
+             "root is on a read-only or cross-device filesystem.",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     server_parser = subparsers.add_parser("server", help="Start sync server")
@@ -75,6 +83,7 @@ def main():
     use_gitignore = not getattr(args, "no_gitignore", False)
 
     rescan_s = args.rescan_interval_s
+    state_dir = args.state_dir
 
     if args.command == "server":
         try:
@@ -82,6 +91,7 @@ def main():
                 args.host, args.port,
                 use_gitignore=use_gitignore,
                 rescan_interval_s=rescan_s,
+                state_dir=state_dir,
             ))
         except KeyboardInterrupt:
             print("\nServer stopped.")
@@ -91,6 +101,7 @@ def main():
                 args.local, args.remote, args.host, args.port,
                 use_gitignore=use_gitignore,
                 rescan_interval_s=rescan_s,
+                state_dir=state_dir,
             ))
         except KeyboardInterrupt:
             print("\nClient stopped.")
@@ -99,6 +110,7 @@ def main():
             args.src, args.dst,
             use_gitignore=use_gitignore,
             rescan_interval_s=rescan_s,
+            state_dir=state_dir,
         )
         try:
             asyncio.run(session.run())

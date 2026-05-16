@@ -27,7 +27,7 @@ MAX_BLOCK_RETRIES = 3
 
 class SyncSession:
     def __init__(self, root_path, reader, writer, loop, use_gitignore=True,
-                 rescan_interval_s=RESCAN_INTERVAL_S):
+                 rescan_interval_s=RESCAN_INTERVAL_S, state_dir=None):
         self.root_path = os.path.abspath(root_path)
         self.reader = reader
         self.writer = writer
@@ -38,6 +38,7 @@ class SyncSession:
         self._watcher = None
         self._rescanner = None
         self._rescan_interval_s = rescan_interval_s
+        self._state_dir = os.path.abspath(state_dir) if state_dir else None
         self._gitignore_matcher = GitIgnoreMatcher(root_path) if use_gitignore else None
 
         self.local_manifest = {}
@@ -54,7 +55,7 @@ class SyncSession:
         self._sync_event = asyncio.Event()
         self._initial_sync_done = False
         self._synced_files = {}
-        clean_staging(self.root_path)
+        clean_staging(self.root_path, self._state_dir)
 
     async def send(self, msg_type, data=None, payload=b""):
         async with self._send_lock:
@@ -156,7 +157,8 @@ class SyncSession:
             # to disk instead of buffering the whole file in memory.
             expected_size = remote_info.get("size", 0) or 0
             self._staging[path] = StagingFile(
-                self.root_path, path, expected_size=expected_size
+                self.root_path, path, expected_size=expected_size,
+                state_dir=self._state_dir,
             )
             indices = need["block_indices"]
             await self.send(
@@ -290,7 +292,7 @@ class SyncSession:
         elif size == 0:
             # Empty file: no block_data arrived, write directly via a
             # zero-byte StagingFile commit for consistency.
-            empty = StagingFile(self.root_path, path, expected_size=0)
+            empty = StagingFile(self.root_path, path, expected_size=0, state_dir=self._state_dir)
             try:
                 empty.commit()
                 self._synced_files[path] = time.time()
@@ -364,6 +366,7 @@ class SyncSession:
                 # the blocks the remote will send us.
                 self._staging[path] = StagingFile(
                     self.root_path, path, expected_size=expected_size,
+                    state_dir=self._state_dir,
                 )
                 await self.send(
                     "request_blocks",
