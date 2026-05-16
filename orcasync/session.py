@@ -17,6 +17,8 @@ from .staging import StagingFile, clean_staging
 from .watcher import FileWatcher
 from .gitignore import GitIgnoreMatcher
 from .logging_util import log_event
+from .conflict import detect_conflict, preserve_local_as_conflict
+from .rescanner import PeriodicRescanner, DEFAULT_INTERVAL_S as RESCAN_INTERVAL_S
 
 logger = logging.getLogger("orcasync.session")
 
@@ -24,7 +26,8 @@ MAX_BLOCK_RETRIES = 3
 
 
 class SyncSession:
-    def __init__(self, root_path, reader, writer, loop, use_gitignore=True):
+    def __init__(self, root_path, reader, writer, loop, use_gitignore=True,
+                 rescan_interval_s=RESCAN_INTERVAL_S):
         self.root_path = os.path.abspath(root_path)
         self.reader = reader
         self.writer = writer
@@ -33,6 +36,8 @@ class SyncSession:
         self._running = True
         self._recv_task = None
         self._watcher = None
+        self._rescanner = None
+        self._rescan_interval_s = rescan_interval_s
         self._gitignore_matcher = GitIgnoreMatcher(root_path) if use_gitignore else None
 
         self.local_manifest = {}
@@ -127,9 +132,22 @@ class SyncSession:
             log_event(logger, logging.INFO, "dir.created", path=need["path"])
         for need in file_needs:
             path = need["path"]
+            remote_info = self._remote_manifest.get(path, {})
+            local_info = self.local_manifest.get(path)
+            # Concurrent edit on both sides → preserve our local copy as
+            # <name>.sync-conflict-* before we overwrite it with the
+            # remote version. The conflict file becomes a regular file
+            # in subsequent scans and propagates to the peer.
+            if detect_conflict(local_info, remote_info):
+                log_event(
+                    logger, logging.WARNING, "conflict.detected",
+                    path=path,
+                    local_mtime=local_info.get("mtime"),
+                    remote_mtime=remote_info.get("mtime"),
+                )
+                preserve_local_as_conflict(self.root_path, path)
             # Cache expected per-block hashes from the remote manifest so we
             # can verify each incoming block payload end-to-end.
-            remote_info = self._remote_manifest.get(path, {})
             blocks = remote_info.get("blocks", []) or []
             self._expected_block_hashes[path] = {
                 b["index"]: b["hash"] for b in blocks
@@ -371,6 +389,16 @@ class SyncSession:
         )
         self._watcher.start()
         log_event(logger, logging.INFO, "watcher.started", root=self.root_path)
+        if self._rescan_interval_s and self._rescan_interval_s > 0:
+            self._rescanner = PeriodicRescanner(
+                self.root_path,
+                self._on_file_change,
+                self.loop,
+                interval_s=self._rescan_interval_s,
+                gitignore_matcher=self._gitignore_matcher,
+            )
+            self._rescanner.seed_known(self.local_manifest)
+            self._rescanner.start()
 
     async def _on_file_change(self, event_type, rel_path, is_dir):
         if rel_path in self._synced_files:
@@ -419,6 +447,8 @@ class SyncSession:
 
     def _cleanup(self):
         self._running = False
+        if self._rescanner:
+            self._rescanner.stop()
         if self._watcher:
             self._watcher.stop()
         if not self.writer.is_closing():

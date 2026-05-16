@@ -24,6 +24,13 @@ def main():
         choices=["text", "json"],
         help="Log format (default: text)",
     )
+    parser.add_argument(
+        "--rescan-interval-s",
+        type=int,
+        default=600,
+        help="Periodic incremental rescan interval in seconds (default: 600; "
+             "0 disables the rescanner)",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     server_parser = subparsers.add_parser("server", help="Start sync server")
@@ -67,18 +74,32 @@ def main():
 
     use_gitignore = not getattr(args, "no_gitignore", False)
 
+    rescan_s = args.rescan_interval_s
+
     if args.command == "server":
         try:
-            asyncio.run(run_server(args.host, args.port, use_gitignore=use_gitignore))
+            asyncio.run(run_server(
+                args.host, args.port,
+                use_gitignore=use_gitignore,
+                rescan_interval_s=rescan_s,
+            ))
         except KeyboardInterrupt:
             print("\nServer stopped.")
     elif args.command == "client":
         try:
-            asyncio.run(run_client(args.local, args.remote, args.host, args.port, use_gitignore=use_gitignore))
+            asyncio.run(run_client(
+                args.local, args.remote, args.host, args.port,
+                use_gitignore=use_gitignore,
+                rescan_interval_s=rescan_s,
+            ))
         except KeyboardInterrupt:
             print("\nClient stopped.")
     elif args.command == "local-sync":
-        session = LocalSyncSession(args.src, args.dst, use_gitignore=use_gitignore)
+        session = LocalSyncSession(
+            args.src, args.dst,
+            use_gitignore=use_gitignore,
+            rescan_interval_s=rescan_s,
+        )
         try:
             asyncio.run(session.run())
         except KeyboardInterrupt:

@@ -16,26 +16,39 @@ from .staging import StagingFile, clean_staging
 from .watcher import FileWatcher
 from .gitignore import GitIgnoreMatcher
 from .logging_util import log_event
+from .conflict import detect_conflict, preserve_local_as_conflict
+from .rescanner import PeriodicRescanner, DEFAULT_INTERVAL_S as RESCAN_INTERVAL_S
 
 logger = logging.getLogger("orcasync.local")
 
 
 class LocalSyncSession:
-    def __init__(self, src_path, dst_path, use_gitignore=True):
+    def __init__(self, src_path, dst_path, use_gitignore=True,
+                 rescan_interval_s=RESCAN_INTERVAL_S):
         self.src_path = os.path.abspath(src_path)
         self.dst_path = os.path.abspath(dst_path)
         self._running = True
         self._src_watcher = None
         self._dst_watcher = None
+        self._src_rescanner = None
+        self._dst_rescanner = None
+        self._rescan_interval_s = rescan_interval_s
         self._synced_files = {}
         self._lock = asyncio.Lock()
         self._src_gitignore = GitIgnoreMatcher(self.src_path) if use_gitignore else None
         self._dst_gitignore = GitIgnoreMatcher(self.dst_path) if use_gitignore else None
+        # Remember the manifest from the last successful sync so the
+        # rescanner can spot drift relative to the agreed state.
+        self._src_baseline = {}
+        self._dst_baseline = {}
 
     async def run(self):
         await self.run_initial_sync()
         self._start_watchers()
-        logger.info("Local sync active: %s <-> %s", self.src_path, self.dst_path)
+        log_event(
+            logger, logging.INFO, "local.active",
+            src=self.src_path, dst=self.dst_path,
+        )
         # Keep running until stopped
         while self._running:
             await asyncio.sleep(1)
@@ -56,25 +69,51 @@ class LocalSyncSession:
             root=self.dst_path, role="dst", entries=len(dst_manifest),
         )
 
-        # Sync dst -> src
+        # Sync dst -> src (src is the "local" side that may need conflict preservation)
         src_needs = diff_manifests(src_manifest, dst_manifest)
         for need in src_needs:
             if need.get("is_dir"):
                 ensure_dir(self.src_path, need["path"])
                 log_event(logger, logging.INFO, "dir.created", root=self.src_path, path=need["path"])
             else:
+                path = need["path"]
+                if detect_conflict(src_manifest.get(path), dst_manifest.get(path)):
+                    log_event(
+                        logger, logging.WARNING, "conflict.detected",
+                        path=path, side="src",
+                        local_mtime=src_manifest.get(path, {}).get("mtime"),
+                        remote_mtime=dst_manifest.get(path, {}).get("mtime"),
+                    )
+                    preserve_local_as_conflict(self.src_path, path)
                 await self._pull_file(self.dst_path, self.src_path, need, dst_manifest)
 
-        # Sync src -> dst
+        # Sync src -> dst (dst is now the "local" side for this direction)
         dst_needs = diff_manifests(dst_manifest, src_manifest)
         for need in dst_needs:
             if need.get("is_dir"):
                 ensure_dir(self.dst_path, need["path"])
                 log_event(logger, logging.INFO, "dir.created", root=self.dst_path, path=need["path"])
             else:
+                path = need["path"]
+                if detect_conflict(dst_manifest.get(path), src_manifest.get(path)):
+                    log_event(
+                        logger, logging.WARNING, "conflict.detected",
+                        path=path, side="dst",
+                        local_mtime=dst_manifest.get(path, {}).get("mtime"),
+                        remote_mtime=src_manifest.get(path, {}).get("mtime"),
+                    )
+                    preserve_local_as_conflict(self.dst_path, path)
                 await self._pull_file(self.src_path, self.dst_path, need, src_manifest)
 
         log_event(logger, logging.INFO, "sync.initial_done")
+        # After the initial sync both roots should be in agreement; record
+        # post-sync manifests as baselines for drift detection.
+        self._src_baseline = scan_directory(
+            self.src_path, gitignore_matcher=self._src_gitignore
+        )
+        self._dst_baseline = scan_directory(
+            self.dst_path, gitignore_matcher=self._dst_gitignore
+        )
 
     async def _pull_file(self, from_root, to_root, need, from_manifest):
         path = need["path"]
@@ -117,6 +156,21 @@ class LocalSyncSession:
         )
         self._src_watcher.start()
         self._dst_watcher.start()
+        if self._rescan_interval_s and self._rescan_interval_s > 0:
+            self._src_rescanner = PeriodicRescanner(
+                self.src_path, self._on_src_change, loop,
+                interval_s=self._rescan_interval_s,
+                gitignore_matcher=self._src_gitignore,
+            )
+            self._dst_rescanner = PeriodicRescanner(
+                self.dst_path, self._on_dst_change, loop,
+                interval_s=self._rescan_interval_s,
+                gitignore_matcher=self._dst_gitignore,
+            )
+            self._src_rescanner.seed_known(self._src_baseline)
+            self._dst_rescanner.seed_known(self._dst_baseline)
+            self._src_rescanner.start()
+            self._dst_rescanner.start()
 
     async def _on_src_change(self, event_type, rel_path, is_dir):
         async with self._lock:
@@ -168,3 +222,7 @@ class LocalSyncSession:
             self._src_watcher.stop()
         if self._dst_watcher:
             self._dst_watcher.stop()
+        if self._src_rescanner:
+            self._src_rescanner.stop()
+        if self._dst_rescanner:
+            self._dst_rescanner.stop()

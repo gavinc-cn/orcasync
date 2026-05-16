@@ -9,7 +9,8 @@ from .logging_util import log_event
 logger = logging.getLogger("orcasync.server")
 
 
-async def run_server(host="0.0.0.0", port=8384, use_gitignore=True):
+async def run_server(host="0.0.0.0", port=8384, use_gitignore=True,
+                     rescan_interval_s=600):
     log_event(logger, logging.INFO, "server.listen", host=host, port=port)
 
     async def handle_client(reader, writer):
@@ -36,6 +37,7 @@ async def run_server(host="0.0.0.0", port=8384, use_gitignore=True):
             session = SyncSession(
                 remote_path, reader, writer, asyncio.get_running_loop(),
                 use_gitignore=use_gitignore,
+                rescan_interval_s=rescan_interval_s,
             )
             await session.run_as_server()
         except Exception as e:
