@@ -95,7 +95,9 @@ class PeriodicRescanner:
             type="incremental", trigger=trigger, root=self.root_path,
         )
         current = scan_directory(
-            self.root_path, gitignore_matcher=self.gitignore_matcher
+            self.root_path,
+            gitignore_matcher=self.gitignore_matcher,
+            known_manifest=self._known,
         )
         added, modified, deleted = _diff_for_changes(self._known, current)
         for path, is_dir in deleted:

@@ -109,12 +109,18 @@ class LocalSyncSession:
         log_event(logger, logging.INFO, "sync.initial_done")
         # After the initial sync both roots should be in agreement; record
         # post-sync manifests as baselines for drift detection.
+        log_event(logger, logging.INFO, "scan.start", root=self.src_path, role="src", type="baseline")
         self._src_baseline = scan_directory(
-            self.src_path, gitignore_matcher=self._src_gitignore
+            self.src_path, gitignore_matcher=self._src_gitignore,
+            known_manifest=src_manifest,
         )
+        log_event(logger, logging.INFO, "scan.done", root=self.src_path, role="src", type="baseline", entries=len(self._src_baseline))
+        log_event(logger, logging.INFO, "scan.start", root=self.dst_path, role="dst", type="baseline")
         self._dst_baseline = scan_directory(
-            self.dst_path, gitignore_matcher=self._dst_gitignore
+            self.dst_path, gitignore_matcher=self._dst_gitignore,
+            known_manifest=dst_manifest,
         )
+        log_event(logger, logging.INFO, "scan.done", root=self.dst_path, role="dst", type="baseline", entries=len(self._dst_baseline))
 
     async def _pull_file(self, from_root, to_root, need, from_manifest):
         path = need["path"]

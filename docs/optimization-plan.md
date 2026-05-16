@@ -166,7 +166,26 @@ log_event(logger, logging.INFO, "sync.done",
 
 ### 5.1 持久化 manifest 缓存
 
-**新增**:`<root>/.orcasync/manifest.db`(SQLite,单文件,跨平台)。
+#### 5.1.0 已实现：内存级 mtime+size 缓存（M1.5，2026-05-16）
+
+**改造点**:[sync_engine.py `scan_directory()`](../orcasync/sync_engine.py)，[rescanner.py `run_once()`](../orcasync/rescanner.py)，[local_sync.py `run_initial_sync()`](../orcasync/local_sync.py)。
+
+在进入 SQLite 持久化之前，先做了运行时内存缓存：
+
+- `scan_directory()` 新增可选参数 `known_manifest`。扫描每个文件时先 `os.stat`，若 `(size, mtime)` 与 `known_manifest` 中的缓存项完全一致，**直接复用旧的 block 列表，不读文件内容**。
+- `PeriodicRescanner.run_once()` 把 `self._known`（上次扫描结果）传入作为缓存。初始 seed 来自 `run_initial_sync()` 后的 baseline manifest。
+- `run_initial_sync()` 完成后的两次 baseline 扫描也传入初始 manifest 作为缓存，大量未变更文件直接跳过 hash。
+- `scan_directory()` 在有 `known_manifest` 时以 DEBUG 级别打印缓存命中统计：`scan.cache_stats hits=… misses=… hit_rate=…%`。
+
+**效果**：对 5000 文件、大多数未变更的目录（典型情况）：
+- 定时 rescan：从 ~14 分钟（全量 hash）→ 几秒（纯 stat）
+- 初始同步后 baseline 扫描：大幅加速
+
+**局限**：缓存在进程内存中，重启后初始扫描仍需全量 hash（首次启动无法受益）。跨重启的加速需要 5.1.1 的 SQLite 持久化。
+
+#### 5.1.1 持久化 manifest 缓存（待实现）
+
+**新增**:`<root>/.orcasync/manifest.db`(SQLite，单文件，跨平台)。
 
 - Schema:
   ```sql
@@ -175,7 +194,7 @@ log_event(logger, logging.INFO, "sync.done",
     is_dir INTEGER NOT NULL,
     size INTEGER,
     mtime REAL,
-    blocks_json TEXT,       -- JSON 数组,[{index,size,hash}]
+    blocks_json TEXT,       -- JSON 数组，[{index,size,hash}]
     version_counter INTEGER DEFAULT 0,   -- 预留 M3 用
     updated_at REAL
   );
@@ -183,7 +202,7 @@ log_event(logger, logging.INFO, "sync.done",
   ```
 - scan 时:`SELECT size, mtime, blocks_json FROM files WHERE path=?` → 若 `(size, mtime)` 不变则**跳过 hash 计算**直接复用。
 - 同步完成后:`INSERT OR REPLACE`。
-- 启动时:用 db 当作初始 manifest,只补差异。**大目录冷启动从分钟级降到秒级**。
+- 启动时:用 db 当作初始 manifest,只补差异。**大目录冷启动从分钟级降到秒级**（解决首次启动问题）。
 
 **日志**:`manifest.cache_hit path=… files_reused=12000 files_rehashed=43`。
 

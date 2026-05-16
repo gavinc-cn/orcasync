@@ -1,9 +1,14 @@
 import os
 import hashlib
+import logging
+
+from .logging_util import log_event
 
 BLOCK_SIZE = 128 * 1024  # 128KB
 
 STATE_DIR = ".orcasync"  # internal state (manifest cache, staging) — never synced
+
+logger = logging.getLogger("orcasync.scan")
 
 
 def normalize_path(path):
@@ -33,10 +38,19 @@ def compute_file_blocks(filepath):
     return blocks
 
 
-def scan_directory(root_path, gitignore_matcher=None):
+def scan_directory(root_path, gitignore_matcher=None, known_manifest=None):
+    """Scan *root_path* and return a manifest dict.
+
+    When *known_manifest* is supplied, files whose (size, mtime) match the
+    cached entry skip content-reading entirely — only changed or new files are
+    hashed.  This turns a periodic rescan on a large network drive from an
+    O(total-bytes) operation into a mostly-stat operation.
+    """
     root = os.path.abspath(root_path)
     os.makedirs(root, exist_ok=True)
     manifest = {}
+    cache_hits = 0
+    cache_misses = 0
 
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root)
@@ -77,7 +91,15 @@ def scan_directory(root_path, gitignore_matcher=None):
                 continue
             try:
                 stat = os.stat(fpath)
-                blocks = compute_file_blocks(fpath)
+                cached = known_manifest.get(rel_path) if known_manifest else None
+                if (cached and not cached.get("is_dir")
+                        and cached.get("size") == stat.st_size
+                        and cached.get("mtime") == stat.st_mtime):
+                    blocks = cached["blocks"]
+                    cache_hits += 1
+                else:
+                    blocks = compute_file_blocks(fpath)
+                    cache_misses += 1
                 manifest[rel_path] = {
                     "path": rel_path,
                     "size": stat.st_size,
@@ -87,6 +109,13 @@ def scan_directory(root_path, gitignore_matcher=None):
                 }
             except (OSError, IOError):
                 continue
+
+    if known_manifest is not None:
+        log_event(
+            logger, logging.DEBUG, "scan.cache_stats",
+            root=root, hits=cache_hits, misses=cache_misses,
+            hit_rate=f"{cache_hits * 100 // max(cache_hits + cache_misses, 1)}%",
+        )
 
     return manifest
 
