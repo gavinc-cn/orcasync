@@ -294,6 +294,9 @@ class LocalSyncSession:
 
         if event_type == "delete":
             delete_path(to_root, rel_path)
+            # Record the delete so the opposite watcher's echo doesn't propagate
+            # the deletion back and erase a file that was recreated in the meantime.
+            self._synced_files[rel_path] = time.time()
             log_event(logger, logging.INFO, "sync.delete", path=rel_path, to=to_root)
         elif event_type == "create" and is_dir:
             ensure_dir(to_root, rel_path)
