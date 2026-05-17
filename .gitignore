@@ -1,8 +1,9 @@
 .idea/
 __pycache__/
-.claude/
+.claude/*
 .vscode/
 
 *.pyc
 *.pyo
 
+!.claude/CLAUDE.md

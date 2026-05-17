@@ -1,0 +1,1 @@
+这个项目允许使用`git commit *`, 但不允许使用`git push`
