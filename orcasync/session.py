@@ -55,6 +55,11 @@ class SyncSession:
         self._sync_event = asyncio.Event()
         self._initial_sync_done = False
         self._synced_files = {}
+        # progress counters for the current initial-sync batch
+        self._total_to_sync = 0
+        self._synced_count = 0
+        # path -> event type ("create"/"modify") for in-flight real-time transfers
+        self._pending_events: dict[str, str] = {}
         clean_staging(self.root_path, self._state_dir)
 
     async def send(self, msg_type, data=None, payload=b""):
@@ -119,6 +124,8 @@ class SyncSession:
             self._remote_manifest.get(n["path"], {}).get("size", 0) or 0
             for n in file_needs
         )
+        self._total_to_sync = len(file_needs)
+        self._synced_count = 0
         log_event(
             logger,
             logging.INFO,
@@ -302,6 +309,23 @@ class SyncSession:
                     path=path, error=str(e),
                 )
         self._pending_transfers.discard(path)
+        if not self._initial_sync_done:
+            # Initial sync: show progress against the known total
+            if self._total_to_sync > 0:
+                self._synced_count += 1
+                log_event(
+                    logger, logging.INFO, "sync.progress",
+                    done=self._synced_count,
+                    total=self._total_to_sync,
+                    path=path,
+                )
+        else:
+            # Real-time transfer complete
+            event = self._pending_events.pop(path, "modify")
+            log_event(
+                logger, logging.INFO, "sync.file",
+                event=event, path=path, size=size or 0,
+            )
         if not self._pending_transfers and not self._initial_sync_done:
             await self.send("sync_done", {})
         self._check_sync_complete()
@@ -357,6 +381,12 @@ class SyncSession:
             expected_size = data.get("size")
 
             if needed:
+                log_event(
+                    logger, logging.INFO, "sync.file_start",
+                    event=event, path=path, blocks=len(needed),
+                    size=expected_size or 0,
+                )
+                self._pending_events[path] = event
                 self._pending_transfers.add(path)
                 self._expected_block_hashes[path] = {
                     i: h for i, h in enumerate(block_hashes)
@@ -380,10 +410,11 @@ class SyncSession:
                     if os.path.isfile(fpath):
                         with open(fpath, "r+b") as f:
                             f.truncate(expected_size)
-                    log_event(
-                        logger, logging.INFO, "remote.already_in_sync",
-                        path=path, size=expected_size,
-                    )
+                log_event(
+                    logger, logging.INFO, "sync.file",
+                    event=event, path=path, size=expected_size or 0,
+                    note="already_in_sync",
+                )
 
     def _start_watcher(self):
         self._watcher = FileWatcher(

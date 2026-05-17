@@ -102,8 +102,22 @@ class LocalSyncSession:
         log_event(logger, logging.INFO, "scan.done",
                   root=self.dst_path, role="dst", entries=len(dst_manifest))
 
-        # Sync dst -> src (src is the "local" side that may need conflict preservation)
+        # Diff both directions up front so we know the total file count before starting.
         src_needs = diff_manifests(src_manifest, dst_manifest)
+        dst_needs = diff_manifests(dst_manifest, src_manifest)
+        total_files = (
+            sum(1 for n in src_needs if not n.get("is_dir")) +
+            sum(1 for n in dst_needs if not n.get("is_dir"))
+        )
+        log_event(
+            logger, logging.INFO, "sync.plan",
+            total_files=total_files,
+            dst_to_src=sum(1 for n in src_needs if not n.get("is_dir")),
+            src_to_dst=sum(1 for n in dst_needs if not n.get("is_dir")),
+        )
+        synced_files = 0
+
+        # Sync dst -> src (src is the "local" side that may need conflict preservation)
         for need in src_needs:
             if need.get("is_dir"):
                 ensure_dir(self.src_path, need["path"])
@@ -118,10 +132,16 @@ class LocalSyncSession:
                         remote_mtime=dst_manifest.get(path, {}).get("mtime"),
                     )
                     preserve_local_as_conflict(self.src_path, path)
+                event = "create" if src_manifest.get(path) is None else "modify"
+                log_event(
+                    logger, logging.INFO, "sync.file_start",
+                    event=event, path=path, direction="dst->src",
+                    done=synced_files + 1, total=total_files,
+                )
                 await self._pull_file(self.dst_path, self.src_path, need, dst_manifest)
+                synced_files += 1
 
         # Sync src -> dst (dst is now the "local" side for this direction)
-        dst_needs = diff_manifests(dst_manifest, src_manifest)
         for need in dst_needs:
             if need.get("is_dir"):
                 ensure_dir(self.dst_path, need["path"])
@@ -136,7 +156,14 @@ class LocalSyncSession:
                         remote_mtime=src_manifest.get(path, {}).get("mtime"),
                     )
                     preserve_local_as_conflict(self.dst_path, path)
+                event = "create" if dst_manifest.get(path) is None else "modify"
+                log_event(
+                    logger, logging.INFO, "sync.file_start",
+                    event=event, path=path, direction="src->dst",
+                    done=synced_files + 1, total=total_files,
+                )
                 await self._pull_file(self.src_path, self.dst_path, need, src_manifest)
+                synced_files += 1
 
         log_event(logger, logging.INFO, "sync.initial_done")
 
