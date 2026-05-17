@@ -3,6 +3,7 @@ import logging
 import logging.handlers
 import os
 import sys
+import time
 
 
 class _JsonFormatter(logging.Formatter):
@@ -87,16 +88,19 @@ def setup_logging(
     # --- optional file handler ---
     if log_file:
         pid = str(os.getpid())
+        ts = time.strftime("%Y%m%d_%H%M%S")
 
         log_file = log_file.replace("{name}", name or "")
         log_file = log_file.replace("{role}", role or "orcasync")
+        log_file = log_file.replace("{ts}", ts)
 
-        # Auto-inject PID before the extension when the caller did not place
-        # {pid} explicitly, ensuring each process writes to its own file.
-        # e.g. "orcasync.log" -> "orcasync.12345.log"
+        # Auto-inject timestamp and PID before the extension when the caller
+        # did not place {pid} explicitly, ensuring each process writes to its
+        # own uniquely named file that is easy to locate by start time.
+        # e.g. "orcasync.log" -> "orcasync.20260517_143022.12345.log"
         if "{pid}" not in log_file:
             base, ext = os.path.splitext(log_file)
-            log_file = f"{base}.{pid}{ext}"
+            log_file = f"{base}.{ts}.{pid}{ext}"
         else:
             log_file = log_file.replace("{pid}", pid)
 
