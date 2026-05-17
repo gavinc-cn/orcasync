@@ -13,6 +13,8 @@ orcasync keeps two directories in sync using block-level delta transfers. It wat
 - **Local sync mode** — sync two local folders directly without TCP (single process)
 - **Cross-platform** — works on Linux, macOS, and Windows with path normalization
 - **Simple protocol** — lightweight JSON header + binary payload over TCP
+- **SQLite manifest cache** — persists file hashes across restarts to avoid full rescans
+- **Daily log rotation** — logs rotate at midnight with per-process files for safe concurrent use
 
 ## Installation
 
@@ -25,6 +27,23 @@ Requirements:
 - watchdog >= 3.0.0
 
 ## Usage
+
+### Global options
+
+These options apply to all subcommands:
+
+```
+--name NAME              Instance name, included in the log filename to
+                         distinguish multiple concurrent instances
+--log-level LEVEL        DEBUG / INFO / WARNING / ERROR (default: INFO)
+--log-format FORMAT      text or json (default: text)
+--log-file PATH          Log file path; defaults to logs/orcasync.log
+                         (or logs/orcasync-NAME.log when --name is set).
+                         Rotates daily. Supports {name}, {role}, {pid} placeholders.
+--log-backup-count N     Days of log backups to keep (default: 30)
+--rescan-interval-s N    Periodic rescan interval in seconds (default: 600; 0 disables)
+--state-dir DIR          External directory for orcasync state files
+```
 
 ### TCP Mode (Remote Sync)
 
@@ -52,20 +71,35 @@ Use this when both folders are on the same machine. No TCP server needed.
 python -m orcasync local-sync --src /path/to/source --dst /path/to/destination
 ```
 
-This runs a single process that syncs both folders bidirectionally, including real-time watching on both sides.
+Add `--fast-start` to skip hashing during the initial scan (uses mtime+size only). This starts syncing in seconds but delays full hash verification until a background rebuild completes.
+
+### Running multiple instances
+
+Use `--name` to keep log files separate when running several orcasync instances at the same time:
+
+```bash
+python -m orcasync --name work  local-sync --src D:\work-local  --dst D:\work-backup
+python -m orcasync --name media local-sync --src D:\media-local --dst D:\media-backup
+```
+
+Logs go to `logs\orcasync-work.{pid}.log` and `logs\orcasync-media.{pid}.log` respectively.
 
 ## Architecture
 
 ```
 orcasync/
-├── cli.py          # CLI argument parsing (server/client/local-sync subcommands)
-├── server.py       # TCP server — accepts connections, runs SyncSession as server
-├── client.py       # TCP client — connects to server, runs SyncSession as client
-├── session.py      # SyncSession — core TCP sync logic
-├── local_sync.py   # LocalSyncSession — local sync without TCP
-├── sync_engine.py  # File scanning, block hashing, diffing, reading/writing blocks
-├── protocol.py     # Binary protocol: [4-byte header length][JSON header][payload bytes]
-└── watcher.py      # FileWatcher — wraps watchdog with debounced async callbacks
+├── cli.py           # CLI argument parsing (server/client/local-sync subcommands)
+├── server.py        # TCP server — accepts connections, runs SyncSession as server
+├── client.py        # TCP client — connects to server, runs SyncSession as client
+├── session.py       # SyncSession — core TCP sync logic
+├── local_sync.py    # LocalSyncSession — local sync without TCP
+├── sync_engine.py   # File scanning, block hashing, diffing, reading/writing blocks
+├── manifest_db.py   # SQLite-backed manifest cache (persists hashes across restarts)
+├── rescanner.py     # Periodic background rescan
+├── protocol.py      # Binary protocol: [4-byte header length][JSON header][payload bytes]
+├── watcher.py       # FileWatcher — wraps watchdog with debounced async callbacks
+├── gitignore.py     # .syncignore / .gitignore filtering
+└── logging_util.py  # Structured logging setup (text/JSON, file rotation)
 ```
 
 ### Sync Flow (TCP Mode)

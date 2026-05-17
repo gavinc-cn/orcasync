@@ -25,6 +25,12 @@ python -m orcasync client --local /path/to/local --remote /path/to/remote --host
 
 # Local sync (no TCP)
 python -m orcasync local-sync --src /path/a --dst /path/b
+
+# Local sync with fast start (skip hashing on initial scan)
+python -m orcasync local-sync --src /path/a --dst /path/b --fast-start
+
+# Named instance (log goes to logs/orcasync-work.{pid}.log)
+python -m orcasync --name work local-sync --src /path/a --dst /path/b
 ```
 
 No linting or type-checking tools are configured. Python 3.10+ required.
@@ -41,8 +47,11 @@ orcasync is a bidirectional file sync tool using asyncio, block-level delta tran
 - **`protocol.py`** — binary wire format: `[4-byte big-endian header length][JSON header][raw payload]`. Message types: `init`, `init_ack`, `manifest`, `request_blocks`, `block_data`, `transfer_done`, `sync_done`, `file_event`.
 - **`watcher.py` (`FileWatcher`)** — wraps watchdog with 0.5s debounce and asyncio callback integration. Strips `\\?\` Windows long-path prefixes and normalizes separators to `/`.
 - **`gitignore.py` (`GitIgnoreMatcher`)** — `.syncignore` at root takes precedence over recursive `.gitignore` files; always ignores `.git/`.
+- **`manifest_db.py`** — SQLite-backed cache for file hashes. Stored in `<sync-root>/.orcasync/manifest.db` (or `--state-dir`). Avoids rehashing unchanged files across restarts using mtime+size as cache keys.
+- **`rescanner.py`** — periodic background rescan that runs `scan_directory()` incrementally and triggers sync for any detected drift.
 - **`server.py` / `client.py`** — TCP entry points; server creates one `SyncSession` per accepted connection.
-- **`cli.py`** — argparse for three subcommands: `server`, `client`, `local-sync`. All support `--no-gitignore`.
+- **`cli.py`** — argparse for three subcommands: `server`, `client`, `local-sync`. Global flags: `--name`, `--log-level`, `--log-format`, `--log-file`, `--log-backup-count`, `--rescan-interval-s`, `--state-dir`.
+- **`logging_util.py`** — `setup_logging()` configures stderr + optional daily-rotating file handler. Filename placeholders: `{name}`, `{role}`, `{pid}`. PID is auto-injected if absent so each process writes its own file.
 
 ### TCP sync flow
 
@@ -60,3 +69,7 @@ orcasync is a bidirectional file sync tool using asyncio, block-level delta tran
 ### Path normalization
 
 `sync_engine.normalize_path()` converts `os.sep` to `/` for all manifest keys and protocol messages. `read_block()` and `write_blocks()` convert back to `os.sep` for actual file I/O. `watcher._Handler._rel()` strips the Windows `\\?\` prefix before normalizing.
+
+### Logging
+
+`setup_logging()` in `logging_util.py` is called once at startup from `cli.py`. It always adds a stderr handler and, when a log file path is provided (default: `logs/orcasync.log`), adds a `TimedRotatingFileHandler` (rotates at midnight, keeps 30 days). The filename has PID injected automatically so concurrent instances never share a file.
